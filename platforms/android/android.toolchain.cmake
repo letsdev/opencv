@@ -1455,9 +1455,9 @@ set( CMAKE_MODULE_LINKER_FLAGS ""                        CACHE STRING "module li
 set( CMAKE_EXE_LINKER_FLAGS    "-Wl,-z,nocopyreloc"      CACHE STRING "executable linker flags" )
 
 # put flags to cache (for debug purpose only)
-set( ANDROID_CXX_FLAGS         "${ANDROID_CXX_FLAGS}"         CACHE INTERNAL "Android specific c/c++ flags" )
-set( ANDROID_CXX_FLAGS_RELEASE "${ANDROID_CXX_FLAGS_RELEASE}" CACHE INTERNAL "Android specific c/c++ Release flags" )
-set( ANDROID_CXX_FLAGS_DEBUG   "${ANDROID_CXX_FLAGS_DEBUG}"   CACHE INTERNAL "Android specific c/c++ Debug flags" )
+set( ANDROID_CXX_FLAGS         "${ANDROID_CXX_FLAGS} -D__ANDROID_API__=${ANDROID_NATIVE_API_LEVEL}"         CACHE INTERNAL "Android specific c/c++ flags" )
+set( ANDROID_CXX_FLAGS_RELEASE "${ANDROID_CXX_FLAGS_RELEASE} -D__ANDROID_API__=${ANDROID_NATIVE_API_LEVEL}" CACHE INTERNAL "Android specific c/c++ Release flags" )
+set( ANDROID_CXX_FLAGS_DEBUG   "${ANDROID_CXX_FLAGS_DEBUG} -D__ANDROID_API__=${ANDROID_NATIVE_API_LEVEL}"   CACHE INTERNAL "Android specific c/c++ Debug flags" )
 set( ANDROID_LINKER_FLAGS      "${ANDROID_LINKER_FLAGS}"      CACHE INTERNAL "Android specific c/c++ linker flags" )
 
 # finish flags
