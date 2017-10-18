@@ -53,6 +53,7 @@ ocv_warnings_disable(CMAKE_CXX_FLAGS /wd4456) # vs2015
 
 if(UNIX AND (CMAKE_COMPILER_IS_GNUCXX OR CV_ICC))
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
+  #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 endif()
 
 if(MSVC AND CV_ICC)
