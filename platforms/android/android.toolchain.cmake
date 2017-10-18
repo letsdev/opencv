@@ -1051,7 +1051,7 @@ if( BUILD_WITH_ANDROID_NDK )
   #set( ANDROID_ABI_INCLUDE_DIRS "${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_NDK}/sources/cxx-stl/llvm-libc++abi/include" )
   set( __libstl                "${ANDROID_NDK}/sources/cxx-stl/llvm-libc++" )
   set( __libstl                "${__libstl}/libs/${ANDROID_NDK_ABI_NAME}/libc++_static.a" )
-  set( ANDROID_STL_INCLUDE_DIRS "${ANDROID_NDK}/sources/android/support/include" "${ANDROID_NDK}/sysroot/usr/include/arm-linux-androideabi" "${ANDROID_NDK}/sysroot/usr/include" "${ANDROID_NDK}/sources/android/support/include" "${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_CXX_ROOT}/llvm-libc++abi/include")
+  set( ANDROID_STL_INCLUDE_DIRS "${ANDROID_NDK}/sources/android/support/include" "${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_CXX_ROOT}/llvm-libc++abi/include" "${ANDROID_NDK}/sources/android/support/include" "${ANDROID_NDK}/sysroot/usr/include/arm-linux-androideabi" "${ANDROID_NDK}/sysroot/usr/include" )
   message ( INFO "Paths: ${ANDROID_CXX_ROOT} ${ANDROID_LLVM_ROOT} ${ANDROID_ABI_INCLUDE_DIRS} ${ANDROID_STL_INCLUDE_DIRS}" )
  else()
   message( FATAL_ERROR "Unknown runtime: ${ANDROID_STL}" )
@@ -1371,6 +1371,10 @@ set( ANDROID_GOLD_LINKER            ${ANDROID_GOLD_LINKER}            CACHE BOOL
 set( ANDROID_NOEXECSTACK            ${ANDROID_NOEXECSTACK}            CACHE BOOL "Allows or disallows undefined symbols in shared libraries" )
 set( ANDROID_RELRO                  ${ANDROID_RELRO}                  CACHE BOOL "Enables RELRO - a memory corruption mitigation technique" )
 mark_as_advanced( ANDROID_NO_UNDEFINED ANDROID_SO_UNDEFINED ANDROID_FUNCTION_LEVEL_LINKING ANDROID_GOLD_LINKER ANDROID_NOEXECSTACK ANDROID_RELRO )
+
+set( CMAKE_SYSTEM_NAME Android )
+set( CMAKE_ANDROID_STL_TYPE c++_shared )
+set( CMAKE_ANDROID_NDK_DEPRECATED_HEADERS 0 )
 
 # linker flags
 set( ANDROID_LINKER_FLAGS "" )
