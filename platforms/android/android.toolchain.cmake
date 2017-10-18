@@ -1051,8 +1051,7 @@ if( BUILD_WITH_ANDROID_NDK )
   #set( ANDROID_ABI_INCLUDE_DIRS "${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_NDK}/sources/cxx-stl/llvm-libc++abi/include" )
   set( __libstl                "${ANDROID_NDK}/sources/cxx-stl/llvm-libc++" )
   set( __libstl                "${__libstl}/libs/${ANDROID_NDK_ABI_NAME}/libc++_static.a" )
-  set( ANDROID_STL_INCLUDE_DIRS "${ANDROID_NDK}/sysroot/usr/include/arm-linux-androideabi" "${ANDROID_NDK}/sysroot/usr/include" "${ANDROID_NDK}/sources/android/support/include" )
-  #"${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_CXX_ROOT}/llvm-libc++abi/include"
+  set( ANDROID_STL_INCLUDE_DIRS "${ANDROID_NDK}/sysroot/usr/include/arm-linux-androideabi" "${ANDROID_NDK}/sysroot/usr/include" "${ANDROID_NDK}/sources/android/support/include" "${ANDROID_CXX_ROOT}/llvm-libc++/include" "${ANDROID_CXX_ROOT}/llvm-libc++abi/include")
   message ( INFO "Paths: ${ANDROID_CXX_ROOT} ${ANDROID_LLVM_ROOT} ${ANDROID_ABI_INCLUDE_DIRS} ${ANDROID_STL_INCLUDE_DIRS}" )
  else()
   message( FATAL_ERROR "Unknown runtime: ${ANDROID_STL}" )
@@ -1274,7 +1273,7 @@ set( ANDROID_CXX_FLAGS "${ANDROID_CXX_FLAGS} -fsigned-char" ) # good/necessary w
 #set( CMAKE_CXX_STANDARD 98 )
 #set( CMAKE_CXX_STANDARD_REQUIRED ON )
 #set( CMAKE_CXX_EXTENSIONS OFF )
-#add_compile_options(-std=c++98)
+#add_compile_options(-std=c++11)
 
 #set( ANDROID_CXX_FLAGS "${ANDROID_CXX_FLAGS} -std=c++11") # good/necessary when porting desktop libraries
 
