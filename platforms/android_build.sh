@@ -1,0 +1,135 @@
+#!/bin/bash
+
+
+################################################################################
+# init (export and remove potential old stuff)
+################################################################################
+export ANDROID_NDK=$ANDROID_NDK_HOME
+if [ -z $ANDROID_NDK ]; then
+  export ANDROID_NDK=$ANDROID_NDK_HOME
+fi
+
+ARM_BUILD_FOLDER="build_android_arm"
+FINAL_RELEASE_FOLDER="opencv"
+INSTALL_DIR_NATIVE=$ARM_BUILD_FOLDER/install/sdk/native
+
+################################################################################
+# arm64 build
+################################################################################
+echo "building for arm64-v8a"
+
+ARCH="arm64-v8a"
+rm -rf $ARM_BUILD_FOLDER
+rm -rf $FINAL_RELEASE_FOLDER
+mkdir $FINAL_RELEASE_FOLDER
+mkdir $FINAL_RELEASE_FOLDER/include
+
+scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=NO -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=aarch64-linux-android-4.9
+
+cd $ARM_BUILD_FOLDER
+make clean
+make -j8
+make install
+cd ..
+
+mv $INSTALL_DIR_NATIVE/jni/include/* $FINAL_RELEASE_FOLDER/include
+mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
+mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+
+
+################################################################################
+# armeabi-v7a build
+################################################################################
+echo "building for armeabi-v7a"
+
+ARCH="armeabi-v7a"
+rm -rf $ARM_BUILD_FOLDER
+
+scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=NO -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=14 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=arm-linux-androideabi-4.9
+
+cd $ARM_BUILD_FOLDER
+make clean
+make -j8
+make install
+cd ..
+
+mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
+mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+
+
+################################################################################
+# armeabi build
+################################################################################
+echo "building for armeabi"
+
+ARCH="armeabi"
+rm -rf $ARM_BUILD_FOLDER
+
+scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=NO -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=14 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=arm-linux-androideabi-4.9
+
+cd $ARM_BUILD_FOLDER
+make clean
+make -j8
+make install
+cd ..
+
+mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
+mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+
+
+################################################################################
+# x86 build
+################################################################################
+echo "building for x86"
+
+ARCH="x86"
+rm -rf $ARM_BUILD_FOLDER
+
+scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=NO -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=14 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=x86-4.9
+
+cd $ARM_BUILD_FOLDER
+make clean
+make -j8
+make install
+cd ..
+
+mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
+mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+
+
+################################################################################
+# x86_64 build
+################################################################################
+echo "building for x86_64"
+
+ARCH="x86_64"
+rm -rf $ARM_BUILD_FOLDER
+
+scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=NO -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=x86_64-4.9
+
+cd $ARM_BUILD_FOLDER
+make clean
+make -j8
+make install
+cd ..
+
+mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
+mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
+
+################################################################################
+# finish
+################################################################################
+
+zip -r $FINAL_RELEASE_FOLDER.zip $FINAL_RELEASE_FOLDER 
+echo "Created zip at: $PWD$FINAL_RELEASE_FOLDER.zip"
+exit 0
