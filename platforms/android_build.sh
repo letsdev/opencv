@@ -4,10 +4,15 @@
 ################################################################################
 # init (export and remove potential old stuff)
 ################################################################################
-export ANDROID_NDK=$ANDROID_NDK_HOME
+
 if [ -z $ANDROID_NDK ]; then
   export ANDROID_NDK=$ANDROID_NDK_HOME
 fi
+
+if [ -z $ANDROID_SDK ]; then
+  export ANDROID_SDK=$ANDROID_HOME
+fi
+
 
 ARM_BUILD_FOLDER="build_android_arm"
 FINAL_RELEASE_FOLDER="opencv"
@@ -130,6 +135,7 @@ mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs
 # finish
 ################################################################################
 
-zip -r $FINAL_RELEASE_FOLDER.zip $FINAL_RELEASE_FOLDER 
+rm $FINAL_RELEASE_FOLDER.zip
+zip -r $FINAL_RELEASE_FOLDER.zip $FINAL_RELEASE_FOLDER
 echo "Created zip at: $PWD$FINAL_RELEASE_FOLDER.zip"
 exit 0
