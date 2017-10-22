@@ -13,10 +13,17 @@ else()
   set(ANDROID_SDK_OS linux)
 endif()
 
+
+
+#
+# TODO Dieser Befehl ist aktuell im android SDK nicht mehr vorhanden und muss im cmake/OpenCVDetectAndroidSDK ersetzt werden (zusätzlich zu den gemachten Änderungen)
+#
+# ./android create lib-project --path /Users/afischer/workspace/letsdev-git/opencv/platforms/build_android_arm --target android-21 --name OpenCV --package org.opencv
+
 #find android SDK: search in ANDROID_SDK first
 find_host_program(ANDROID_EXECUTABLE
-  NAMES android.bat android
-  PATH_SUFFIXES tools
+  NAMES android.bat avdmanager
+  PATH_SUFFIXES tools/bin
   PATHS
     ENV ANDROID_SDK
   DOC "Android SDK location"
@@ -25,11 +32,12 @@ find_host_program(ANDROID_EXECUTABLE
 
 # Now search default paths
 find_host_program(ANDROID_EXECUTABLE
-  NAMES android.bat android
+  NAMES android.bat avdmanager
   PATH_SUFFIXES android-sdk-${ANDROID_SDK_OS}/tools
                 android-sdk-${ANDROID_SDK_OS}_x86/tools
                 android-sdk-${ANDROID_SDK_OS}_86/tools
                 android-sdk/tools
+                android-sdk/tools/bin
   PATHS /opt
         "${HOME_ENV_PATH}/NVPACK"
         "$ENV{SystemDrive}/NVPACK"
@@ -45,15 +53,15 @@ if(ANDROID_EXECUTABLE)
   get_filename_component(ANDROID_SDK_TOOLS_PATH "${ANDROID_EXECUTABLE}" PATH)
 
   #read source.properties
-  if(EXISTS "${ANDROID_SDK_TOOLS_PATH}/source.properties")
-    file(STRINGS "${ANDROID_SDK_TOOLS_PATH}/source.properties" ANDROID_SDK_TOOLS_SOURCE_PROPERTIES_LINES REGEX "^[ ]*[^#].*$")
+  if(EXISTS "${ANDROID_SDK_TOOLS_PATH}/../source.properties")
+    file(STRINGS "${ANDROID_SDK_TOOLS_PATH}/../source.properties" ANDROID_SDK_TOOLS_SOURCE_PROPERTIES_LINES REGEX "^[ ]*[^#].*$")
     foreach(line ${ANDROID_SDK_TOOLS_SOURCE_PROPERTIES_LINES})
       string(REPLACE "\\:" ":" line ${line})
       string(REPLACE "=" ";" line ${line})
       list(GET line 0 line_name)
       list(GET line 1 line_value)
       string(REPLACE "." "_" line_name ${line_name})
-      SET(ANDROID_TOOLS_${line_name} "${line_value}" CACHE INTERNAL "from ${ANDROID_SDK_TOOLS_PATH}/source.properties")
+      SET(ANDROID_TOOLS_${line_name} "${line_value}" CACHE INTERNAL "from ${ANDROID_SDK_TOOLS_PATH}/../source.properties")
       MARK_AS_ADVANCED(ANDROID_TOOLS_${line_name})
     endforeach()
   endif()
@@ -95,7 +103,7 @@ if(ANDROID_EXECUTABLE)
       ERROR_VARIABLE ANDROID_PROCESS_ERRORS
       OUTPUT_STRIP_TRAILING_WHITESPACE
       )
-    string(REGEX MATCHALL "[^\n]+" ANDROID_SDK_TARGETS "${ANDROID_SDK_TARGETS}")
+    string(REGEX MATCHALL "android\\-[^\n]+" ANDROID_SDK_TARGETS "${ANDROID_SDK_TARGETS}")
   else()
     #old SDKs (r11 and older) don't provide compact list
     execute_process(COMMAND ${ANDROID_EXECUTABLE} list target
