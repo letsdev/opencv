@@ -41,15 +41,20 @@
 //M*/
 
 #include "../precomp.hpp"
+#include "../op_inf_engine.hpp"
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
+
+#ifdef HAVE_OPENCL
+#include "opencl_kernels_dnn.hpp"
+#endif
 
 namespace cv
 {
 namespace dnn
 {
 
-class SliceLayerImpl : public SliceLayer
+class SliceLayerImpl CV_FINAL : public SliceLayer
 {
 public:
     SliceLayerImpl(const LayerParams& params)
@@ -58,7 +63,7 @@ public:
         axis = params.get<int>("axis", 1);
         if (params.has("slice_point"))
         {
-            CV_Assert(!params.has("begin") && !params.has("size"));
+            CV_Assert(!params.has("begin") && !params.has("size") && !params.has("end"));
             const DictValue &indicesValue = params.get("slice_point");
             sliceRanges.resize(indicesValue.size() + 1,
                                std::vector<Range>(axis + 1, Range::all()));
@@ -71,32 +76,48 @@ public:
             }
             sliceRanges.back()[axis].start = prevSlice;
         }
-        else if (params.has("begin") && params.has("size"))
+        else if (params.has("begin"))
         {
+            CV_Assert(params.has("size") ^ params.has("end"));
             const DictValue &begins = params.get("begin");
-            const DictValue &sizes = params.get("size");
-            CV_Assert(begins.size() == sizes.size());
+            const DictValue &sizesOrEnds = params.has("size") ? params.get("size") : params.get("end");
+            CV_Assert(begins.size() == sizesOrEnds.size());
 
             sliceRanges.resize(1);
             sliceRanges[0].resize(begins.size(), Range::all());
             for (int i = 0; i < begins.size(); ++i)
             {
                 int start = begins.get<int>(i);
-                int size = sizes.get<int>(i);
+                int sizeOrEnd = sizesOrEnds.get<int>(i);  // It may be negative to reverse indexation.
                 CV_Assert(start >= 0);
-                CV_Assert(size == -1 || size > 0);  // -1 value means range [start, axis_size).
 
                 sliceRanges[0][i].start = start;
-                if (size > 0)
-                    sliceRanges[0][i].end = start + size;
+                if (params.has("size"))
+                {
+                    int size = sizeOrEnd;
+                    CV_Assert(size == -1 || size > 0);  // -1 value means range [start, axis_size).
+                    sliceRanges[0][i].end = size > 0 ? (start + size) : -1;  // We'll finalize a negative value later.
+                }
+                else
+                {
+                    int end = sizeOrEnd;
+                    CV_Assert(end < 0 || end > start);  // End index is excluded.
+                    sliceRanges[0][i].end = end;  // We'll finalize a negative value later.
+                }
             }
         }
+    }
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+        return backendId == DNN_BACKEND_OPENCV ||
+               backendId == DNN_BACKEND_INFERENCE_ENGINE && sliceRanges.size() == 1;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                             const int requiredOutputs,
                             std::vector<MatShape> &outputs,
-                            std::vector<MatShape> &internals) const
+                            std::vector<MatShape> &internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size() == 1);
         MatShape inpShape = inputs[0];
@@ -109,8 +130,7 @@ public:
                 CV_Assert(sliceRanges[i].size() <= inpShape.size());
                 for (int j = 0; j < sliceRanges[i].size(); ++j)
                 {
-                    outputs[i][j] = std::min(sliceRanges[i][j].end, inpShape[j]) -
-                                    std::max(sliceRanges[i][j].start, 0);
+                    outputs[i][j] = clamp(sliceRanges[i][j], inpShape[j]).size();
                 }
             }
         }
@@ -124,7 +144,7 @@ public:
         return false;
     }
 
-    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs)
+    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
     {
         CV_Assert(inputs.size() == 1);
         const MatSize& inpShape = inputs[0]->size;
@@ -148,22 +168,81 @@ public:
 
         for (int i = 0; i < outputs.size(); ++i)
         {
-            CV_Assert(sliceRanges[i].size() <= inpShape[-1]);
+            CV_Assert(sliceRanges[i].size() <= inpShape.dims());
             // Clamp.
             for (int j = 0; j < sliceRanges[i].size(); ++j)
             {
-                sliceRanges[i][j].start = std::max(0, sliceRanges[i][j].start);
-                sliceRanges[i][j].end = std::min(sliceRanges[i][j].end, inpShape[j]);
+                sliceRanges[i][j] = clamp(sliceRanges[i][j], inpShape[j]);
             }
             // Fill the rest of ranges.
-            for (int j = sliceRanges[i].size(); j < inpShape[-1]; ++j)
+            for (int j = sliceRanges[i].size(); j < inpShape.dims(); ++j)
             {
                 sliceRanges[i].push_back(Range::all());
             }
         }
     }
 
-    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals)
+#ifdef HAVE_OPENCL
+    bool forward_ocl(InputArrayOfArrays inputs_, OutputArrayOfArrays outputs_, OutputArrayOfArrays internals_)
+    {
+        std::vector<UMat> inputs;
+        std::vector<UMat> outputs;
+
+        bool use_half = (inputs_.depth() == CV_16S);
+        inputs_.getUMatVector(inputs);
+        outputs_.getUMatVector(outputs);
+
+        if (inputs[0].dims < 4 || (total(shape(outputs[0]), 0, 2) % 4 != 0) ||
+            (total(shape(outputs[0]), 2) % 4 != 0))
+            return false;
+
+        String opts;
+        if (use_half)
+            opts = "-DDtype=half -DDtype4=half4 -DDtype8=half8";
+        else
+            opts = "-DDtype=float -DDtype4=float4 -DDtype8=float8";
+        const UMat& inpMat = inputs[0];
+        for (size_t i = 0; i < outputs.size(); i++)
+        {
+            int groups = outputs[i].size[0];
+            int channels = outputs[i].size[1];
+            int rows = outputs[i].size[2];
+            int cols = outputs[i].size[3];
+
+            ocl::Kernel kernel("slice", ocl::dnn::slice_oclsrc, opts);
+            size_t local[] = { 128 };
+            size_t global[] = { (size_t)groups * channels / 4 * local[0] };
+            int idx = 0;
+            kernel.set(idx++, ocl::KernelArg::PtrReadOnly(inpMat));
+            kernel.set(idx++, (int)(inpMat.size[2] * inpMat.size[3]));
+            kernel.set(idx++, (int)(rows * cols));
+            kernel.set(idx++, (int)inpMat.size[3]);
+            kernel.set(idx++, (int)cols);
+            kernel.set(idx++, (int)sliceRanges[i][2].start);
+            kernel.set(idx++, (int)sliceRanges[i][3].start);
+            kernel.set(idx++, ocl::KernelArg::PtrWriteOnly(outputs[i]));
+            bool ret = kernel.run(1, global, local, false);
+            if (!ret)
+                return false;
+        }
+
+        return true;
+    }
+#endif
+
+    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
+    {
+        CV_TRACE_FUNCTION();
+        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+
+        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
+                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+
+        Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+    }
+
+    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
@@ -174,6 +253,43 @@ public:
         {
             inpMat(sliceRanges[i]).copyTo(outputs[i]);
         }
+    }
+
+    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+    {
+#ifdef HAVE_INF_ENGINE
+        InferenceEngine::DataPtr input = infEngineDataNode(inputs[0]);
+        InferenceEngine::LayerParams lp;
+        lp.name = name;
+        lp.type = "Crop";
+        lp.precision = InferenceEngine::Precision::FP32;
+        std::shared_ptr<InferenceEngine::CropLayer> ieLayer(new InferenceEngine::CropLayer(lp));
+
+        CV_Assert(sliceRanges.size() == 1);
+
+        int from, to, step;
+        if (preferableTarget == DNN_TARGET_MYRIAD)
+        {
+            from = 1;
+            to = sliceRanges[0].size() + 1;
+            step = 1;
+        }
+        else
+        {
+            from = sliceRanges[0].size() - 1;
+            to = -1;
+            step = -1;
+        }
+        for (int i = from; i != to; i += step)
+        {
+            ieLayer->axis.push_back(i);
+            ieLayer->offset.push_back(sliceRanges[0][i].start);
+            ieLayer->dim.push_back(sliceRanges[0][i].end - sliceRanges[0][i].start);
+        }
+        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+
+#endif  // HAVE_INF_ENGINE
+        return Ptr<BackendNode>();
     }
 };
 

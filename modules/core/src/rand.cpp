@@ -74,6 +74,12 @@ namespace cv
 
 #define  RNG_NEXT(x)    ((uint64)(unsigned)(x)*CV_RNG_COEFF + ((x) >> 32))
 
+#ifdef __PPC64__
+    #define PPC_MUL_ADD(ret, tmp, p0, p1)                           \
+    asm volatile("fmuls %0,%1,%2\n\t fadds %0,%0,%3" : "=&f" (ret)  \
+                : "f" (tmp), "f" (p0), "f" (p1))
+#endif
+
 /***************************************************************************************\
 *                           Pseudo-Random Number Generators (PRNGs)                     *
 \***************************************************************************************/
@@ -248,6 +254,14 @@ static void randf_32f( float* arr, int len, uint64* state, const Vec2f* p, bool 
 
         volatile float32x4_t v0 = vmulq_f32(vld1q_f32(f), p0);
         vst1q_f32(arr+i, vaddq_f32(v0, p1));
+#elif defined __PPC64__
+        // inline asm is required for numerical stability!
+        // compilers tends to use floating multiply-add single(fmadds)
+        // instead of separate multiply and add
+        PPC_MUL_ADD(arr[i+0], f[0], p[i+0][0], p[i+0][1]);
+        PPC_MUL_ADD(arr[i+1], f[1], p[i+1][0], p[i+1][1]);
+        PPC_MUL_ADD(arr[i+2], f[2], p[i+2][0], p[i+2][1]);
+        PPC_MUL_ADD(arr[i+3], f[3], p[i+3][0], p[i+3][1]);
 #else
         arr[i+0] = f[0]*p[i+0][0] + p[i+0][1];
         arr[i+1] = f[1]*p[i+1][0] + p[i+1][1];
@@ -269,6 +283,8 @@ static void randf_32f( float* arr, int len, uint64* state, const Vec2f* p, bool 
                 vdup_n_f32((float)(int)temp), vdup_n_f32(p[i][0])),
                 vdup_n_f32(p[i][1]));
         arr[i] = vget_lane_f32(t, 0);
+#elif defined __PPC64__
+        PPC_MUL_ADD(arr[i], (float)(int)temp, p[i][0], p[i][1]);
 #else
         arr[i] = (int)temp*p[i][0] + p[i][1];
 #endif
@@ -526,7 +542,7 @@ void RNG::fill( InputOutputArray _mat, int disttype,
     if( disttype == UNIFORM )
     {
         _parambuf.allocate(cn*8 + n1 + n2);
-        double* parambuf = _parambuf;
+        double* parambuf = _parambuf.data();
         double* p1 = _param1.ptr<double>();
         double* p2 = _param2.ptr<double>();
 
@@ -635,7 +651,7 @@ void RNG::fill( InputOutputArray _mat, int disttype,
     else if( disttype == CV_RAND_NORMAL )
     {
         _parambuf.allocate(MAX(n1, cn) + MAX(n2, cn));
-        double* parambuf = _parambuf;
+        double* parambuf = _parambuf.data();
 
         int ptype = depth == CV_64F ? CV_64F : CV_32F;
         int esz = (int)CV_ELEM_SIZE(ptype);
@@ -685,7 +701,7 @@ void RNG::fill( InputOutputArray _mat, int disttype,
     if( disttype == UNIFORM )
     {
         buf.allocate(blockSize*cn*4);
-        param = (uchar*)(double*)buf;
+        param = (uchar*)(double*)buf.data();
 
         if( depth <= CV_32S )
         {
@@ -722,7 +738,7 @@ void RNG::fill( InputOutputArray _mat, int disttype,
     else
     {
         buf.allocate((blockSize*cn+1)/2);
-        nbuf = (float*)(double*)buf;
+        nbuf = (float*)(double*)buf.data();
     }
 
     for( size_t i = 0; i < it.nplanes; i++, ++it )

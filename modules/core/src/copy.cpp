@@ -90,28 +90,19 @@ copyMask_<uchar>(const uchar* _src, size_t sstep, const uchar* mask, size_t mste
         const uchar* src = (const uchar*)_src;
         uchar* dst = (uchar*)_dst;
         int x = 0;
-        #if CV_SSE4_2
-        if(USE_SSE4_2)//
+        #if CV_SIMD128
         {
-            __m128i zero = _mm_setzero_si128 ();
+            v_uint8x16 v_zero = v_setzero_u8();
 
-             for( ; x <= size.width - 16; x += 16 )
-             {
-                 const __m128i rSrc = _mm_lddqu_si128((const __m128i*)(src+x));
-                 __m128i _mask = _mm_lddqu_si128((const __m128i*)(mask+x));
-                 __m128i rDst = _mm_lddqu_si128((__m128i*)(dst+x));
-                 __m128i _negMask = _mm_cmpeq_epi8(_mask, zero);
-                 rDst = _mm_blendv_epi8(rSrc, rDst, _negMask);
-                 _mm_storeu_si128((__m128i*)(dst + x), rDst);
-             }
-        }
-        #elif CV_NEON
-        uint8x16_t v_one = vdupq_n_u8(1);
-        for( ; x <= size.width - 16; x += 16 )
-        {
-            uint8x16_t v_mask = vcgeq_u8(vld1q_u8(mask + x), v_one);
-            uint8x16_t v_dst = vld1q_u8(dst + x), v_src = vld1q_u8(src + x);
-            vst1q_u8(dst + x, vbslq_u8(v_mask, v_src, v_dst));
+            for( ; x <= size.width - 16; x += 16 )
+            {
+                v_uint8x16 v_src   = v_load(src  + x),
+                           v_dst   = v_load(dst  + x),
+                           v_nmask = v_load(mask + x) == v_zero;
+
+                v_dst = v_select(v_nmask, v_dst, v_src);
+                v_store(dst + x, v_dst);
+            }
         }
         #endif
         for( ; x < size.width; x++ )
@@ -130,31 +121,24 @@ copyMask_<ushort>(const uchar* _src, size_t sstep, const uchar* mask, size_t mst
         const ushort* src = (const ushort*)_src;
         ushort* dst = (ushort*)_dst;
         int x = 0;
-        #if CV_SSE4_2
-        if(USE_SSE4_2)//
+        #if CV_SIMD128
         {
-            __m128i zero = _mm_setzero_si128 ();
-            for( ; x <= size.width - 8; x += 8 )
-            {
-                 const __m128i rSrc =_mm_lddqu_si128((const __m128i*)(src+x));
-                 __m128i _mask = _mm_loadl_epi64((const __m128i*)(mask+x));
-                 _mask = _mm_unpacklo_epi8(_mask, _mask);
-                 __m128i rDst = _mm_lddqu_si128((const __m128i*)(dst+x));
-                 __m128i _negMask = _mm_cmpeq_epi8(_mask, zero);
-                 rDst = _mm_blendv_epi8(rSrc, rDst, _negMask);
-                 _mm_storeu_si128((__m128i*)(dst + x), rDst);
-             }
-        }
-        #elif CV_NEON
-        uint8x8_t v_one = vdup_n_u8(1);
-        for( ; x <= size.width - 8; x += 8 )
-        {
-            uint8x8_t v_mask = vcge_u8(vld1_u8(mask + x), v_one);
-            uint8x8x2_t v_mask2 = vzip_u8(v_mask, v_mask);
-            uint16x8_t v_mask_res = vreinterpretq_u16_u8(vcombine_u8(v_mask2.val[0], v_mask2.val[1]));
+            v_uint8x16 v_zero = v_setzero_u8();
 
-            uint16x8_t v_src = vld1q_u16(src + x), v_dst = vld1q_u16(dst + x);
-            vst1q_u16(dst + x, vbslq_u16(v_mask_res, v_src, v_dst));
+            for( ; x <= size.width - 16; x += 16 )
+            {
+                v_uint16x8 v_src1 = v_load(src + x), v_src2 = v_load(src + x + 8),
+                           v_dst1 = v_load(dst + x), v_dst2 = v_load(dst + x + 8);
+
+                v_uint8x16 v_nmask1, v_nmask2;
+                v_uint8x16 v_nmask = v_load(mask + x) == v_zero;
+                v_zip(v_nmask, v_nmask, v_nmask1, v_nmask2);
+
+                v_dst1 = v_select(v_reinterpret_as_u16(v_nmask1), v_dst1, v_src1);
+                v_dst2 = v_select(v_reinterpret_as_u16(v_nmask2), v_dst2, v_src2);
+                v_store(dst + x, v_dst1);
+                v_store(dst + x + 8, v_dst2);
+            }
         }
         #endif
         for( ; x < size.width; x++ )
@@ -262,13 +246,14 @@ void Mat::copyTo( OutputArray _dst ) const
         return;
     }
 
+    if( empty() )
+    {
+        _dst.release();
+        return;
+    }
+
     if( _dst.isUMat() )
     {
-        if( empty() )
-        {
-            _dst.release();
-            return;
-        }
         _dst.create( dims, size.p, type() );
         UMat dst = _dst.getUMat();
         CV_Assert(dst.u != NULL);
@@ -385,12 +370,21 @@ void Mat::copyTo( OutputArray _dst, InputArray _mask ) const
         CV_Assert( size() == mask.size() );
     }
 
-    uchar* data0 = _dst.getMat().data;
-    _dst.create( dims, size, type() );
-    Mat dst = _dst.getMat();
+    Mat dst;
+    {
+        Mat dst0 = _dst.getMat();
+        _dst.create(dims, size, type()); // TODO Prohibit 'dst' re-creation, user should pass it explicitly with correct size/type or empty
+        dst = _dst.getMat();
 
-    if( dst.data != data0 ) // do not leave dst uninitialized
-        dst = Scalar(0);
+        if (dst.data != dst0.data) // re-allocation happened
+        {
+#ifdef OPENCV_FUTURE
+            CV_Assert(dst0.empty() &&
+                "copyTo(): dst size/type mismatch (looks like a bug) - use dst.release() before copyTo() call to suppress this message");
+#endif
+            dst = Scalar(0); // do not leave dst uninitialized
+        }
+    }
 
     CV_IPP_RUN_FAST(ipp_copyTo(*this, dst, mask))
 
@@ -468,6 +462,16 @@ static bool ipp_Mat_setTo_Mat(Mat &dst, Mat &_val, Mat &mask)
     if(dst.channels() > 4)
         return false;
 
+    if (dst.depth() == CV_32F)
+    {
+        for (int i = 0; i < (int)(_val.total()); i++)
+        {
+            float v = (float)(_val.at<double>(i));  // cast to float
+            if (cvIsNaN(v) || cvIsInf(v))  // accept finite numbers only
+                return false;
+        }
+    }
+
     if(dst.dims <= 2)
     {
         IppiSize            size     = ippiSize(dst.size());
@@ -527,7 +531,7 @@ Mat& Mat::setTo(InputArray _value, InputArray _mask)
     int blockSize0 = std::min(totalsz, (int)((BLOCK_SIZE + esz-1)/esz));
     blockSize0 -= blockSize0 % mcn;    // must be divisible without remainder for unrolling and advancing
     AutoBuffer<uchar> _scbuf(blockSize0*esz + 32);
-    uchar* scbuf = alignPtr((uchar*)_scbuf, (int)sizeof(double));
+    uchar* scbuf = alignPtr((uchar*)_scbuf.data(), (int)sizeof(double));
     convertAndUnrollScalar( value, type(), scbuf, blockSize0/mcn );
 
     for( size_t i = 0; i < it.nplanes; i++, ++it )
@@ -555,7 +559,7 @@ flipHoriz( const uchar* src, size_t sstep, uchar* dst, size_t dstep, Size size, 
 {
     int i, j, limit = (int)(((size.width + 1)/2)*esz);
     AutoBuffer<int> _tab(size.width*esz);
-    int* tab = _tab;
+    int* tab = _tab.data();
 
     for( i = 0; i < size.width; i++ )
         for( size_t k = 0; k < esz; k++ )
@@ -956,7 +960,7 @@ void copyMakeBorder_8u( const uchar* src, size_t srcstep, cv::Size srcroi,
     }
 
     cv::AutoBuffer<int> _tab((dstroi.width - srcroi.width)*cn);
-    int* tab = _tab;
+    int* tab = _tab.data();
     int right = dstroi.width - srcroi.width - left;
     int bottom = dstroi.height - srcroi.height - top;
 
@@ -1027,7 +1031,7 @@ void copyMakeConstBorder_8u( const uchar* src, size_t srcstep, cv::Size srcroi,
 {
     int i, j;
     cv::AutoBuffer<uchar> _constBuf(dstroi.width*cn);
-    uchar* constBuf = _constBuf;
+    uchar* constBuf = _constBuf.data();
     int right = dstroi.width - srcroi.width - left;
     int bottom = dstroi.height - srcroi.height - top;
 
@@ -1220,10 +1224,10 @@ void cv::copyMakeBorder( InputArray _src, OutputArray _dst, int top, int bottom,
             CV_Assert( value[0] == value[1] && value[0] == value[2] && value[0] == value[3] );
             cn1 = 1;
         }
-        scalarToRawData(value, buf, CV_MAKETYPE(src.depth(), cn1), cn);
+        scalarToRawData(value, buf.data(), CV_MAKETYPE(src.depth(), cn1), cn);
         copyMakeConstBorder_8u( src.ptr(), src.step, src.size(),
                                 dst.ptr(), dst.step, dst.size(),
-                                top, left, (int)src.elemSize(), (uchar*)(double*)buf );
+                                top, left, (int)src.elemSize(), (uchar*)buf.data() );
     }
 }
 

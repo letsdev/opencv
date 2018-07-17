@@ -637,7 +637,7 @@ template<class Op, class VecOp> struct MorphRowFilter : public BaseRowFilter
         anchor = _anchor;
     }
 
-    void operator()(const uchar* src, uchar* dst, int width, int cn)
+    void operator()(const uchar* src, uchar* dst, int width, int cn) CV_OVERRIDE
     {
         int i, j, k, _ksize = ksize*cn;
         const T* S = (const T*)src;
@@ -691,7 +691,7 @@ template<class Op, class VecOp> struct MorphColumnFilter : public BaseColumnFilt
         anchor = _anchor;
     }
 
-    void operator()(const uchar** _src, uchar* dst, int dststep, int count, int width)
+    void operator()(const uchar** _src, uchar* dst, int dststep, int count, int width) CV_OVERRIDE
     {
         int i, k, _ksize = ksize;
         const T** src = (const T**)_src;
@@ -792,7 +792,7 @@ template<class Op, class VecOp> struct MorphFilter : BaseFilter
         ptrs.resize( coords.size() );
     }
 
-    void operator()(const uchar** src, uchar* dst, int dststep, int count, int width, int cn)
+    void operator()(const uchar** src, uchar* dst, int dststep, int count, int width, int cn) CV_OVERRIDE
     {
         const Point* pt = &coords[0];
         const T** kp = (const T**)&ptrs[0];
@@ -888,7 +888,6 @@ cv::Ptr<cv::BaseRowFilter> cv::getMorphologyRowFilter(int op, int type, int ksiz
     }
 
     CV_Error_( CV_StsNotImplemented, ("Unsupported data type (=%d)", type));
-    return Ptr<BaseRowFilter>();
 }
 
 cv::Ptr<cv::BaseColumnFilter> cv::getMorphologyColumnFilter(int op, int type, int ksize, int anchor)
@@ -935,7 +934,6 @@ cv::Ptr<cv::BaseColumnFilter> cv::getMorphologyColumnFilter(int op, int type, in
     }
 
     CV_Error_( CV_StsNotImplemented, ("Unsupported data type (=%d)", type));
-    return Ptr<BaseColumnFilter>();
 }
 
 
@@ -973,7 +971,6 @@ cv::Ptr<cv::BaseFilter> cv::getMorphologyFilter(int op, int type, InputArray _ke
     }
 
     CV_Error_( CV_StsNotImplemented, ("Unsupported data type (=%d)", type));
-    return Ptr<BaseFilter>();
 }
 
 
@@ -1148,6 +1145,11 @@ static bool ippMorph(int op, int src_type, int dst_type,
     // Different mask flipping
     if(op == MORPH_GRADIENT)
         return false;
+
+    // Integer overflow bug
+    if(src_step >= IPP_MAX_32S ||
+       src_step*height >= IPP_MAX_32S)
+        return false;
 #endif
 
 #if IPP_VERSION_X100 < 201801
@@ -1181,7 +1183,7 @@ static bool ippMorph(int op, int src_type, int dst_type,
 
     CV_UNUSED(isSubmatrix);
 
-    if(morphType < 0)
+    if((int)morphType < 0)
         return false;
 
     if(iterations > 1 && morphType != iwiMorphErode && morphType != iwiMorphDilate)
@@ -1403,6 +1405,7 @@ void morph(int op, int src_type, int dst_type,
 
 #define ROUNDUP(sz, n)      ((sz) + (n) - 1 - (((sz) + (n) - 1) % (n)))
 
+#ifndef __APPLE__
 static bool ocl_morph3x3_8UC1( InputArray _src, OutputArray _dst, InputArray _kernel, Point anchor,
                                int op, int actual_op = -1, InputArray _extraMat = noArray())
 {
@@ -1628,16 +1631,15 @@ static bool ocl_morphSmall( InputArray _src, OutputArray _dst, InputArray _kerne
     }
 
     return kernel.run(2, globalsize, NULL, false);
-
 }
+#endif
 
 static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
                         Point anchor, int iterations, int op, int borderType,
                         const Scalar &, int actual_op = -1, InputArray _extraMat = noArray())
 {
     const ocl::Device & dev = ocl::Device::getDefault();
-    int type = _src.type(), depth = CV_MAT_DEPTH(type),
-            cn = CV_MAT_CN(type), esz = CV_ELEM_SIZE(type);
+    int type = _src.type(), depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
     Mat kernel = _kernel.getMat();
     Size ksize = !kernel.empty() ? kernel.size() : Size(3, 3), ssize = _src.size();
 
@@ -1664,14 +1666,13 @@ static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
         iterations = 1;
     }
 
+#ifndef __APPLE__
+    int esz = CV_ELEM_SIZE(type);
     // try to use OpenCL kernel adopted for small morph kernel
-    if (dev.isIntel() && !(dev.type() & ocl::Device::TYPE_CPU) &&
+    if (dev.isIntel() &&
         ((ksize.width < 5 && ksize.height < 5 && esz <= 4) ||
          (ksize.width == 5 && ksize.height == 5 && cn == 1)) &&
          (iterations == 1)
-#if defined __APPLE__
-         && cn == 1
-#endif
          )
     {
         if (ocl_morph3x3_8UC1(_src, _dst, kernel, anchor, op, actual_op, _extraMat))
@@ -1680,6 +1681,7 @@ static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
         if (ocl_morphSmall(_src, _dst, kernel, anchor, borderType, op, actual_op, _extraMat))
             return true;
     }
+#endif
 
     if (iterations == 0 || kernel.rows*kernel.cols == 1)
     {
@@ -2113,16 +2115,18 @@ void cv::morphologyEx( InputArray _src, OutputArray _dst, int op,
             k2 = (kernel == -1);
 
             if (countNonZero(k1) <= 0)
-                e1 = src;
+                e1 = Mat(src.size(), src.type(), Scalar(255));
             else
                 erode(src, e1, k1, anchor, iterations, borderType, borderValue);
 
-            Mat src_complement;
-            bitwise_not(src, src_complement);
             if (countNonZero(k2) <= 0)
-                e2 = src_complement;
+                e2 = Mat(src.size(), src.type(), Scalar(255));
             else
+            {
+                Mat src_complement;
+                bitwise_not(src, src_complement);
                 erode(src_complement, e2, k2, anchor, iterations, borderType, borderValue);
+            }
             dst = e1 & e2;
         }
         break;

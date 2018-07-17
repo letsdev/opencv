@@ -89,7 +89,7 @@ CMAKE_CONFIG_GENERATOR="Visual Studio 14 2015 Win64"
 @endcode
     with no Perf tests, no tests, no doc, no CUDA and no example
 @code{.bash}
-CMAKE_OPTIONS='-DBUILD_PERF_TESTS:BOOL=OFF -DBUILD_TESTS:BOOL=OFF -DBUILD_DOCS:BOOL=OFF  -DWITH_CUDA:BOOL=OFF -DBUILD_EXAMPLES:BOOL=OFF'
+CMAKE_OPTIONS='-DBUILD_PERF_TESTS:BOOL=OFF -DBUILD_TESTS:BOOL=OFF -DBUILD_DOCS:BOOL=OFF -DBUILD_EXAMPLES:BOOL=OFF'
 @endcode
 -#  In git command line enter following command :
 @code{.bash}
@@ -401,6 +401,6 @@ Save it to the registry and you are done. If you ever change the location of you
 or want to try out your application with a different build, all you will need to do is to update the
 OPENCV_DIR variable via the *setx* command inside a command window.
 
-Now you can continue reading the tutorials with the @ref tutorial_windows_visual_studio_Opencv section.
+Now you can continue reading the tutorials with the @ref tutorial_windows_visual_studio_opencv section.
 There you will find out how to use the OpenCV library in your own projects with the help of the
 Microsoft Visual Studio IDE.

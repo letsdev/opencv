@@ -50,11 +50,737 @@
 #include "precomp.hpp"
 #include "opencl_kernels_imgproc.hpp"
 #include "hal_replacement.hpp"
+#include "opencv2/core/hal/intrin.hpp"
 
 #include "opencv2/core/openvx/ovx_defs.hpp"
 #include "resize.hpp"
 
+#include "opencv2/core/softfloat.hpp"
+#include "fixedpoint.inl.hpp"
+
 using namespace cv;
+
+namespace
+{
+
+template <typename ET, bool needsign> struct fixedtype { typedef fixedpoint64 type; };
+template <> struct fixedtype<uint32_t, false> { typedef ufixedpoint64 type; };
+template <bool needsign> struct fixedtype<int16_t, needsign> { typedef fixedpoint32 type; };
+template <> struct fixedtype<uint16_t, false> { typedef ufixedpoint32 type; };
+template <bool needsign> struct fixedtype<int8_t, needsign> { typedef fixedpoint32 type; };
+template <> struct fixedtype<uint8_t, false> { typedef ufixedpoint16 type; };
+
+//FT is fixedtype<ET, needsign>::type
+template <typename ET, typename FT, int n, bool mulall>
+static void hlineResize(ET* src, int cn, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+{
+    int i = 0;
+    for (; i < dst_min; i++, m += n) // Points that fall left from src image so became equal to leftmost src point
+    {
+        for (int j = 0; j < cn; j++, dst++)
+        {
+            *dst = src[j];
+        }
+    }
+    for (; i < dst_max; i++, m += n)
+    {
+        ET* src_ofst = src + cn*ofst[i];
+        for (int j = 0; j < cn; j++, dst++)
+        {
+            *dst = (mulall || !m[0].isZero()) ? m[0] * src_ofst[j] : FT::zero();
+            for (int k = 1; k < n; k++)
+            {
+                *dst = *dst + ((mulall || !m[k].isZero()) ? m[k] * src_ofst[j+k*cn] : FT::zero());
+            }
+        }
+    }
+    ET* src_last = src + cn*ofst[dst_width - 1];
+    for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+    {
+        for (int j = 0; j < cn; j++, dst++)
+        {
+            *dst = src_last[j];
+        }
+    }
+}
+template <typename ET, typename FT, int n, bool mulall, int cncnt> struct hline
+{
+    static void ResizeCn(ET* src, int cn, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        hlineResize<ET, FT, n, mulall>(src, cn, ofst, m, dst, dst_min, dst_max, dst_width);
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 2, true, 1>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]);
+        for (; i < dst_min; i++, m += 2) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+        }
+        for (; i < dst_max; i++, m += 2)
+        {
+            ET* px = src + ofst[i];
+            *(dst++) = m[0] * px[0] + m[1] * px[1];
+        }
+        src0 = (src + ofst[dst_width - 1])[0];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 2, true, 2>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]);
+        for (; i < dst_min; i++, m += 2) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+        }
+        for (; i < dst_max; i++, m += 2)
+        {
+            ET* px = src + 2*ofst[i];
+            *(dst++) = m[0] * px[0] + m[1] * px[2];
+            *(dst++) = m[0] * px[1] + m[1] * px[3];
+        }
+        src0 = (src + 2*ofst[dst_width - 1])[0];
+        src1 = (src + 2*ofst[dst_width - 1])[1];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 2, true, 3>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]), src2(src[2]);
+        for (; i < dst_min; i++, m += 2) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+        }
+        for (; i < dst_max; i++, m += 2)
+        {
+            ET* px = src + 3*ofst[i];
+            *(dst++) = m[0] * px[0] + m[1] * px[3];
+            *(dst++) = m[0] * px[1] + m[1] * px[4];
+            *(dst++) = m[0] * px[2] + m[1] * px[5];
+        }
+        src0 = (src + 3*ofst[dst_width - 1])[0];
+        src1 = (src + 3*ofst[dst_width - 1])[1];
+        src2 = (src + 3*ofst[dst_width - 1])[2];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 2, true, 4>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]), src2(src[2]), src3(src[3]);
+        for (; i < dst_min; i++, m += 2) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+            *(dst++) = src3;
+        }
+        for (; i < dst_max; i++, m += 2)
+        {
+            ET* px = src + 4*ofst[i];
+            *(dst++) = m[0] * px[0] + m[1] * px[4];
+            *(dst++) = m[0] * px[1] + m[1] * px[5];
+            *(dst++) = m[0] * px[2] + m[1] * px[6];
+            *(dst++) = m[0] * px[3] + m[1] * px[7];
+        }
+        src0 = (src + 4*ofst[dst_width - 1])[0];
+        src1 = (src + 4*ofst[dst_width - 1])[1];
+        src2 = (src + 4*ofst[dst_width - 1])[2];
+        src3 = (src + 4*ofst[dst_width - 1])[3];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+            *(dst++) = src3;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 4, true, 1>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]);
+        for (; i < dst_min; i++, m += 4) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+        }
+        for (; i < dst_max; i++, m += 4)
+        {
+            ET* px = src + ofst[i];
+            *(dst++) = m[0] * src[0] + m[1] * src[1] + m[2] * src[2] + m[3] * src[3];
+        }
+        src0 = (src + ofst[dst_width - 1])[0];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 4, true, 2>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]);
+        for (; i < dst_min; i++, m += 4) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+        }
+        for (; i < dst_max; i++, m += 4)
+        {
+            ET* px = src + 2*ofst[i];
+            *(dst++) = m[0] * src[0] + m[1] * src[2] + m[2] * src[4] + m[3] * src[6];
+            *(dst++) = m[0] * src[1] + m[1] * src[3] + m[2] * src[5] + m[3] * src[7];
+        }
+        src0 = (src + 2*ofst[dst_width - 1])[0];
+        src1 = (src + 2*ofst[dst_width - 1])[1];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 4, true, 3>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]), src2(src[2]);
+        for (; i < dst_min; i++, m += 4) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+        }
+        for (; i < dst_max; i++, m += 4)
+        {
+            ET* px = src + 3*ofst[i];
+            *(dst++) = m[0] * src[0] + m[1] * src[3] + m[2] * src[6] + m[3] * src[ 9];
+            *(dst++) = m[0] * src[1] + m[1] * src[4] + m[2] * src[7] + m[3] * src[10];
+            *(dst++) = m[0] * src[2] + m[1] * src[5] + m[2] * src[8] + m[3] * src[11];
+        }
+        src0 = (src + 3*ofst[dst_width - 1])[0];
+        src1 = (src + 3*ofst[dst_width - 1])[1];
+        src2 = (src + 3*ofst[dst_width - 1])[2];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+        }
+    }
+};
+template <typename ET, typename FT> struct hline<ET, FT, 4, true, 4>
+{
+    static void ResizeCn(ET* src, int, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+    {
+        int i = 0;
+        FT src0(src[0]), src1(src[1]), src2(src[2]), src3(src[3]);
+        for (; i < dst_min; i++, m += 4) // Points that fall left from src image so became equal to leftmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+            *(dst++) = src3;
+        }
+        for (; i < dst_max; i++, m += 4)
+        {
+            ET* px = src + 4*ofst[i];
+            *(dst++) = m[0] * src[0] + m[1] * src[4] + m[2] * src[ 8] + m[3] * src[12];
+            *(dst++) = m[0] * src[1] + m[1] * src[5] + m[2] * src[ 9] + m[3] * src[13];
+            *(dst++) = m[0] * src[2] + m[1] * src[6] + m[2] * src[10] + m[3] * src[14];
+            *(dst++) = m[0] * src[3] + m[1] * src[7] + m[2] * src[11] + m[3] * src[15];
+        }
+        src0 = (src + 4*ofst[dst_width - 1])[0];
+        src1 = (src + 4*ofst[dst_width - 1])[1];
+        src2 = (src + 4*ofst[dst_width - 1])[2];
+        src3 = (src + 4*ofst[dst_width - 1])[3];
+        for (; i < dst_width; i++) // Points that fall right from src image so became equal to rightmost src point
+        {
+            *(dst++) = src0;
+            *(dst++) = src1;
+            *(dst++) = src2;
+            *(dst++) = src3;
+        }
+    }
+};
+template <typename ET, typename FT, int n, bool mulall, int cncnt>
+static void hlineResizeCn(ET* src, int cn, int *ofst, FT* m, FT* dst, int dst_min, int dst_max, int dst_width)
+{
+    hline<ET, FT, n, mulall, cncnt>::ResizeCn(src, cn, ofst, m, dst, dst_min, dst_max, dst_width);
+};
+
+template <>
+void hlineResizeCn<uint8_t, ufixedpoint16, 2, true, 1>(uint8_t* src, int, int *ofst, ufixedpoint16* m, ufixedpoint16* dst, int dst_min, int dst_max, int dst_width)
+{
+    int i = 0;
+    ufixedpoint16 src_0(src[0]);
+    v_uint16x8 v_src_0 = v_setall_u16(*((uint16_t*)&src_0));
+    for (; i < dst_min - 7; i += 8, m += 16, dst += 8) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint16_t*)dst, v_src_0);
+    }
+    for (; i < dst_min; i++, m += 2)
+    {
+        *(dst++) = src_0;
+    }
+    for (; i < dst_max - 7 && ofst[i + 7] + 15 <= ofst[dst_width - 1]; i += 8, m += 16, dst += 8)
+    {
+        v_uint32x4 v_src01 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + ofst[i    ])), v_reinterpret_as_u32(v_load_expand(src + ofst[i + 1])));
+        v_uint32x4 v_src23 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + ofst[i + 2])), v_reinterpret_as_u32(v_load_expand(src + ofst[i + 3])));
+        v_uint32x4 v_src45 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + ofst[i + 4])), v_reinterpret_as_u32(v_load_expand(src + ofst[i + 5])));
+        v_uint32x4 v_src67 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + ofst[i + 6])), v_reinterpret_as_u32(v_load_expand(src + ofst[i + 7])));
+
+        v_uint32x4 v_zip02, v_zip13, v_zip46, v_zip57;
+        v_zip(v_src01, v_src23, v_zip02, v_zip13);
+        v_zip(v_src45, v_src67, v_zip46, v_zip57);
+
+        v_uint32x4 v_src0, v_src1;
+        v_zip(v_combine_low(v_zip02, v_zip46), v_combine_low(v_zip13, v_zip57), v_src0, v_src1);
+
+        v_int16x8 v_mul0 = v_load((int16_t*)m);
+        v_int16x8 v_mul1 = v_load((int16_t*)m + 8);
+        v_uint32x4 v_res0 = v_reinterpret_as_u32(v_dotprod(v_reinterpret_as_s16(v_src0), v_mul0));
+        v_uint32x4 v_res1 = v_reinterpret_as_u32(v_dotprod(v_reinterpret_as_s16(v_src1), v_mul1));
+        v_store((uint16_t*)dst, v_pack(v_res0, v_res1));
+    }
+    for (; i < dst_max; i += 1, m += 2)
+    {
+        uint8_t* px = src + ofst[i];
+        *(dst++) = m[0] * px[0] + m[1] * px[1];
+    }
+    src_0 = (src + ofst[dst_width - 1])[0];
+    v_src_0 = v_setall_u16(*((uint16_t*)&src_0));
+    for (; i < dst_width - 7; i += 8, dst += 8) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint16_t*)dst, v_src_0);
+    }
+    for (; i < dst_width; i++)
+    {
+        *(dst++) = src_0;
+    }
+}
+template <>
+void hlineResizeCn<uint8_t, ufixedpoint16, 2, true, 2>(uint8_t* src, int, int *ofst, ufixedpoint16* m, ufixedpoint16* dst, int dst_min, int dst_max, int dst_width)
+{
+    int i = 0;
+    ufixedpoint16 srccn[8] = { src[0], src[1], src[0], src[1], src[0], src[1], src[0], src[1] };
+    v_uint16x8 v_srccn = v_load((uint16_t*)srccn);
+    for (; i < dst_min - 3; i += 4, m += 8, dst += 8) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint16_t*)dst, v_srccn);
+    }
+    for (; i < dst_min; i++, m += 2)
+    {
+        *(dst++) = srccn[0];
+        *(dst++) = srccn[1];
+    }
+    for (; i < dst_max - 3 && ofst[i + 3] + 7 <= ofst[dst_width - 1]; i += 4, m += 8, dst += 8)
+    {
+        v_uint32x4 v_src0 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + 2 * ofst[i    ])), v_reinterpret_as_u32(v_load_expand(src + 2 * ofst[i + 1])));
+        v_uint32x4 v_src1 = v_combine_low(v_reinterpret_as_u32(v_load_expand(src + 2 * ofst[i + 2])), v_reinterpret_as_u32(v_load_expand(src + 2 * ofst[i + 3])));
+
+        v_uint32x4 v_zip0, v_zip1;
+        v_zip(v_src0, v_src1, v_zip0, v_zip1);
+        v_zip(v_zip0, v_zip1, v_src0, v_src1);
+
+        v_int16x8 v_src0123, v_src4567;
+        v_zip(v_reinterpret_as_s16(v_src0), v_reinterpret_as_s16(v_src1), v_src0123, v_src4567);
+
+        v_uint32x4 v_mul = v_load((uint32_t*)m);//AaBbCcDd
+        v_zip(v_mul, v_mul, v_zip0, v_zip1);//AaAaBbBb CcCcDdDd
+        v_uint32x4 v_res0 = v_reinterpret_as_u32(v_dotprod(v_src0123, v_reinterpret_as_s16(v_zip0)));
+        v_uint32x4 v_res1 = v_reinterpret_as_u32(v_dotprod(v_src4567, v_reinterpret_as_s16(v_zip1)));
+        v_store((uint16_t*)dst, v_pack(v_res0, v_res1));//AB1AB2CD1CD2
+    }
+    for (; i < dst_max; i += 1, m += 2)
+    {
+        uint8_t* px = src + 2 * ofst[i];
+        *(dst++) = m[0] * px[0] + m[1] * px[2];
+        *(dst++) = m[0] * px[1] + m[1] * px[3];
+    }
+    srccn[0] = (src + 2 * ofst[dst_width - 1])[0]; srccn[1] = (src + 2 * ofst[dst_width - 1])[1]; srccn[2] = (src + 2 * ofst[dst_width - 1])[0]; srccn[3] = (src + 2 * ofst[dst_width - 1])[1];
+    srccn[4] = (src + 2 * ofst[dst_width - 1])[0]; srccn[5] = (src + 2 * ofst[dst_width - 1])[1]; srccn[6] = (src + 2 * ofst[dst_width - 1])[0]; srccn[7] = (src + 2 * ofst[dst_width - 1])[1];
+    v_srccn = v_load((uint16_t*)srccn);
+    for (; i < dst_width - 3; i += 4, dst += 8) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint16_t*)dst, v_srccn);
+    }
+    for (; i < dst_width; i++)
+    {
+        *(dst++) = srccn[0];
+        *(dst++) = srccn[1];
+    }
+}
+template <>
+void hlineResizeCn<uint8_t, ufixedpoint16, 2, true, 4>(uint8_t* src, int, int *ofst, ufixedpoint16* m, ufixedpoint16* dst, int dst_min, int dst_max, int dst_width)
+{
+    int i = 0;
+    ufixedpoint16 srccn[8] = { src[0], src[1], src[2], src[3], src[0], src[1], src[2], src[3] };
+    v_uint16x8 v_srccn = v_load((uint16_t*)srccn);
+    for (; i < dst_min - 1; i += 2, m += 4, dst += 8) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint16_t*)dst, v_srccn);
+    }
+    if (i < dst_min) // Points that fall left from src image so became equal to leftmost src point
+    {
+        *(dst++) = srccn[0];
+        *(dst++) = srccn[1];
+        *(dst++) = srccn[2];
+        *(dst++) = srccn[3];
+        i++; m += 2;
+    }
+    for (; i < dst_max - 1 && ofst[i + 1] + 3 <= ofst[dst_width - 1]; i += 2, m += 4, dst += 8)
+    {
+        v_int16x8 v_src01 = v_reinterpret_as_s16(v_load_expand(src + 4 * ofst[i    ]));
+        v_int16x8 v_src23 = v_reinterpret_as_s16(v_load_expand(src + 4 * ofst[i + 1]));
+
+        v_int16x8 v_tmp0, v_tmp1;
+        v_recombine(v_src01, v_src23, v_tmp0, v_tmp1);
+        v_zip(v_tmp0, v_tmp1, v_src01, v_src23);
+
+        v_int16x8 v_mul01 = v_reinterpret_as_s16(v_setall_u32(((uint32_t*)m)[0]));//AaAaAaAa
+        v_int16x8 v_mul23 = v_reinterpret_as_s16(v_setall_u32(((uint32_t*)m)[1]));//BbBbBbBb
+        v_uint32x4 v_res0 = v_reinterpret_as_u32(v_dotprod(v_src01, v_mul01));
+        v_uint32x4 v_res1 = v_reinterpret_as_u32(v_dotprod(v_src23, v_mul23));
+        v_store((uint16_t*)dst, v_pack(v_res0, v_res1));//AB1AB2CD1CD2
+    }
+    for (; i < dst_max; i += 1, m += 2)
+    {
+        uint8_t* px = src + 4 * ofst[i];
+        *(dst++) = m[0] * px[0] + m[1] * px[4];
+        *(dst++) = m[0] * px[1] + m[1] * px[5];
+        *(dst++) = m[0] * px[2] + m[1] * px[6];
+        *(dst++) = m[0] * px[3] + m[1] * px[7];
+    }
+    srccn[0] = (src + 4 * ofst[dst_width - 1])[0]; srccn[1] = (src + 4 * ofst[dst_width - 1])[1]; srccn[2] = (src + 4 * ofst[dst_width - 1])[2]; srccn[3] = (src + 4 * ofst[dst_width - 1])[3];
+    srccn[4] = (src + 4 * ofst[dst_width - 1])[0]; srccn[5] = (src + 4 * ofst[dst_width - 1])[1]; srccn[6] = (src + 4 * ofst[dst_width - 1])[2]; srccn[7] = (src + 4 * ofst[dst_width - 1])[3];
+    v_srccn = v_load((uint16_t*)srccn);
+    for (; i < dst_width - 1; i += 2, dst += 8) // Points that fall right from src image so became equal to rightmost src point
+    {
+        v_store((uint16_t*)dst, v_srccn);
+    }
+    if (i < dst_width)
+    {
+        *(dst++) = srccn[0];
+        *(dst++) = srccn[1];
+        *(dst++) = srccn[2];
+        *(dst++) = srccn[3];
+    }
+}
+template <>
+void hlineResizeCn<uint16_t, ufixedpoint32, 2, true, 1>(uint16_t* src, int, int *ofst, ufixedpoint32* m, ufixedpoint32* dst, int dst_min, int dst_max, int dst_width)
+{
+    int i = 0;
+    ufixedpoint32 src_0(src[0]);
+    v_uint32x4 v_src_0 = v_setall_u32(*((uint32_t*)&src_0));
+    for (; i < dst_min - 3; i += 4, m += 8, dst += 4) // Points that fall left from src image so became equal to leftmost src point
+    {
+        v_store((uint32_t*)dst, v_src_0);
+    }
+    for (; i < dst_min; i++, m += 2)
+    {
+        *(dst++) = src_0;
+    }
+    for (; i < dst_max - 3 && ofst[i + 3] + 8 <= ofst[dst_width - 1]; i += 4, m += 8, dst += 4)
+    {
+        v_uint32x4 v_src0 = v_combine_low(v_load_expand(src + ofst[i]), v_load_expand(src + ofst[i + 1]));
+        v_uint32x4 v_mul0 = v_load((uint32_t*)m);
+        v_uint32x4 v_src1 = v_combine_low(v_load_expand(src + ofst[i + 2]), v_load_expand(src + ofst[i + 3]));
+        v_uint32x4 v_mul1 = v_load((uint32_t*)m + 4);
+        v_uint32x4 v_res0 = v_src0 * v_mul0;//a1a2b1b2
+        v_uint32x4 v_res1 = v_src1 * v_mul1;//c1c2d1d2
+        v_uint32x4 v_tmp0, v_tmp1;
+        v_recombine(v_res0, v_res1, v_tmp0, v_tmp1);//a1a2c1c2 b1b2d1d2
+        v_zip(v_tmp0, v_tmp1, v_res0, v_res1);//a1b1a2b2 c1d1c2d2
+        v_recombine(v_res0, v_res1, v_tmp0, v_tmp1);//a1b1c1d1 a2b2c2d2
+        v_store((uint32_t*)dst, v_tmp0 + v_tmp1);//abcd
+    }
+    for (; i < dst_max; i += 1, m += 2)
+    {
+        uint16_t* px = src + ofst[i];
+        *(dst++) = m[0] * px[0] + m[1] * px[1];
+    }
+    src_0 = (src + ofst[dst_width - 1])[0];
+    v_src_0 = v_setall_u32(*((uint32_t*)&src_0));
+    for (; i < dst_width - 3; i += 4, dst += 4)
+    {
+        v_store((uint32_t*)dst, v_src_0);
+    }
+    for (; i < dst_width; i++)
+    {
+        *(dst++) = src_0;
+    }
+}
+
+template <typename ET, typename FT>
+void vlineSet(FT* src, ET* dst, int dst_width)
+{
+    for (int i = 0; i < dst_width; i++)
+        dst[i] = src[i];
+}
+template <>
+void vlineSet<uint8_t, ufixedpoint16>(ufixedpoint16* src, uint8_t* dst, int dst_width)
+{
+    static const v_uint16x8 v_fixedRound = v_setall_u16((uint16_t)((1U << 8) >> 1));
+    int i = 0;
+    for (; i < dst_width - 15; i += 16, src += 16, dst += 16)
+    {
+        v_uint16x8 v_src0 = v_load((uint16_t*)src);
+        v_uint16x8 v_src1 = v_load((uint16_t*)src + 8);
+
+        v_uint16x8 v_res0 = (v_src0 + v_fixedRound) >> 8;
+        v_uint16x8 v_res1 = (v_src1 + v_fixedRound) >> 8;
+
+        v_store(dst, v_pack(v_res0, v_res1));
+    }
+    for (; i < dst_width; i++)
+        *(dst++) = *(src++);
+}
+
+template <typename ET, typename FT, int n>
+void vlineResize(FT* src, size_t src_step, FT* m, ET* dst, int dst_width)
+{
+    for (int i = 0; i < dst_width; i++)
+    {
+        typename FT::WT res = src[i] * m[0];
+        for (int k = 1; k < n; k++)
+            res = res + src[i + k*src_step] * m[k];
+        dst[i] = res;
+    }
+}
+template <>
+void vlineResize<uint8_t, ufixedpoint16, 2>(ufixedpoint16* src, size_t src_step, ufixedpoint16* m, uint8_t* dst, int dst_width)
+{
+    static const v_int32x4 v_fixedRound = v_setall_s32((int32_t)((1 << 16) >> 1));
+    static const v_int16x8 v_128    = v_reinterpret_as_s16(v_setall_u16((uint16_t)1<<15));
+    static const v_int8x16 v_128_16 = v_reinterpret_as_s8 (v_setall_u8 ((uint8_t) 1<<7));
+
+    int i = 0;
+    ufixedpoint16* src1 = src + src_step;
+    v_int16x8 v_mul = v_reinterpret_as_s16(v_setall_u32(((uint32_t*)m)[0]));
+    for (; i < dst_width - 15; i += 16, src += 16, src1 += 16, dst += 16)
+    {
+        v_int16x8 v_src00 = v_load((int16_t*)src);
+        v_int16x8 v_src10 = v_load((int16_t*)src1);
+        v_int16x8 v_tmp0, v_tmp1;
+        v_zip(v_add_wrap(v_src00,v_128), v_add_wrap(v_src10,v_128), v_tmp0, v_tmp1);
+
+        v_int32x4 v_res0 = v_dotprod(v_tmp0, v_mul);
+        v_int32x4 v_res1 = v_dotprod(v_tmp1, v_mul);
+
+        v_int16x8 v_src01 = v_load((int16_t*)src + 8);
+        v_int16x8 v_src11 = v_load((int16_t*)src1 + 8);
+        v_zip(v_add_wrap(v_src01,v_128), v_add_wrap(v_src11,v_128), v_tmp0, v_tmp1);
+        v_int32x4 v_res2 = v_dotprod(v_tmp0, v_mul);
+        v_int32x4 v_res3 = v_dotprod(v_tmp1, v_mul);
+
+        v_int8x16 v_res = v_pack(v_pack((v_res0 + v_fixedRound) >> 16,
+                                        (v_res1 + v_fixedRound) >> 16),
+                                 v_pack((v_res2 + v_fixedRound) >> 16,
+                                        (v_res3 + v_fixedRound) >> 16));
+
+        v_store(dst, v_reinterpret_as_u8(v_sub_wrap(v_res, v_128_16)));
+    }
+    for (; i < dst_width; i++)
+    {
+        *(dst++) = (uint8_t)(*(src++) * m[0] + *(src1++) * m[1]);
+    }
+}
+
+template <typename ET> class interpolationLinear
+{
+public:
+    static const int len = 2;
+    static const bool needsign = false;
+    interpolationLinear(double inv_scale, int srcsize, int dstsize) : scale(softdouble::one() / softdouble(inv_scale)), maxsize(srcsize), minofst(0), maxofst(dstsize) {}
+    void getCoeffs(int val, int* offset, typename fixedtype<ET, needsign>::type* coeffs)
+    {
+        typedef typename fixedtype<ET, needsign>::type fixedpoint;
+        softdouble fval = scale*(softdouble(val)+softdouble(0.5))-softdouble(0.5);
+        int ival = cvFloor(fval);
+        if (ival >= 0 && maxsize > 1)
+        {
+            if (ival < maxsize - 1)
+            {
+                *offset = ival;
+                coeffs[1] = fval - softdouble(ival);
+                coeffs[0] = fixedpoint::one() - coeffs[1];
+            }
+            else
+            {
+                *offset = maxsize - 1;
+                maxofst = min(maxofst, val);
+            }
+        }
+        else
+        {
+            minofst = max(minofst, val + 1);
+        }
+    }
+    void getMinMax(int &min, int &max)
+    {
+        min = minofst;
+        max = maxofst;
+    }
+protected:
+    softdouble scale;
+    int maxsize;
+    int minofst, maxofst;
+};
+
+template <typename ET, typename FT, int interp_y_len>
+class resize_bitExactInvoker :
+    public ParallelLoopBody
+{
+public:
+    typedef FT fixedpoint;
+    typedef void(*hResizeFunc)(ET* src, int cn, int *ofst, fixedpoint* m, fixedpoint* dst, int dst_min, int dst_max, int dst_width);
+    resize_bitExactInvoker(const uchar* _src, size_t _src_step, int _src_width, int _src_height,
+                           uchar* _dst, size_t _dst_step, int _dst_width, int _dst_height,
+                           int _cn, int *_xoffsets, int *_yoffsets, fixedpoint *_xcoeffs, fixedpoint *_ycoeffs,
+                           int _min_x, int _max_x, int _min_y, int _max_y, hResizeFunc _hResize) : ParallelLoopBody(),
+                           src(_src), src_step(_src_step), src_width(_src_width), src_height(_src_height),
+                           dst(_dst), dst_step(_dst_step), dst_width(_dst_width), dst_height(_dst_height),
+                           cn(_cn), xoffsets(_xoffsets), yoffsets(_yoffsets), xcoeffs(_xcoeffs), ycoeffs(_ycoeffs),
+                           min_x(_min_x), max_x(_max_x), min_y(_min_y), max_y(_max_y), hResize(_hResize) {}
+
+    virtual void operator() (const Range& range) const CV_OVERRIDE
+    {
+        AutoBuffer<fixedpoint> linebuf(interp_y_len * dst_width * cn);
+        int last_eval = - interp_y_len;
+        int evalbuf_start = 0;
+        int rmin_y = max(min_y, range.start);
+        int rmax_y = min(max_y, range.end);
+        if (range.start < min_y)
+        {
+            last_eval = 1 - interp_y_len;
+            evalbuf_start = 1;
+            hResize((ET*)src, cn, xoffsets, xcoeffs, linebuf.data(), min_x, max_x, dst_width);
+        }
+        int dy = range.start;
+        for (; dy < rmin_y; dy++)
+            vlineSet<ET, FT>(linebuf.data(), (ET*)(dst + dst_step * dy), dst_width*cn);
+        for (; dy < rmax_y; dy++)
+        {
+            int &iy = yoffsets[dy];
+
+            int i;
+            for (i = max(iy, last_eval + interp_y_len); i < min(iy + interp_y_len, src_height); i++, evalbuf_start = (evalbuf_start + 1) % interp_y_len)
+                hResize((ET*)(src + i * src_step), cn, xoffsets, xcoeffs, linebuf.data() + evalbuf_start*(dst_width * cn), min_x, max_x, dst_width);
+            evalbuf_start = (evalbuf_start + max(iy, src_height - interp_y_len) - max(last_eval, src_height - interp_y_len)) % interp_y_len;
+            last_eval = iy;
+
+            fixedpoint curcoeffs[interp_y_len];
+            for (i = 0; i < evalbuf_start; i++)
+                curcoeffs[i] = ycoeffs[ dy*interp_y_len - evalbuf_start + interp_y_len + i];
+            for (; i < interp_y_len; i++)
+                curcoeffs[i] = ycoeffs[ dy*interp_y_len - evalbuf_start + i];
+
+            vlineResize<ET, FT, interp_y_len>(linebuf.data(), dst_width*cn, curcoeffs, (ET*)(dst + dst_step * dy), dst_width*cn);
+        }
+        fixedpoint *endline = linebuf.data();
+        if (last_eval + interp_y_len > src_height)
+            endline += dst_width*cn*((evalbuf_start + src_height - 1 - last_eval) % interp_y_len);
+        else
+            hResize((ET*)(src + (src_height - 1) * src_step), cn, xoffsets, xcoeffs, endline, min_x, max_x, dst_width);
+        for (; dy < range.end; dy++)
+            vlineSet<ET, FT>(endline, (ET*)(dst + dst_step * dy), dst_width*cn);
+    }
+
+private:
+    const uchar* src;
+    size_t src_step;
+    int src_width, src_height;
+    uchar* dst;
+    size_t dst_step;
+    int dst_width, dst_height, cn;
+    int *xoffsets, *yoffsets;
+    fixedpoint *xcoeffs, *ycoeffs;
+    int min_x, max_x, min_y, max_y;
+    hResizeFunc hResize;
+
+    resize_bitExactInvoker(const resize_bitExactInvoker&);
+    resize_bitExactInvoker& operator=(const resize_bitExactInvoker&);
+};
+
+template <typename ET, typename interpolation>
+void resize_bitExact(const uchar* src, size_t src_step, int src_width, int src_height,
+                           uchar* dst, size_t dst_step, int dst_width, int dst_height,
+                     int cn, double inv_scale_x, double inv_scale_y)
+{
+    typedef typename fixedtype<ET, interpolation::needsign>::type fixedpoint;
+    void(*hResize)(ET* src, int cn, int *ofst, fixedpoint* m, fixedpoint* dst, int dst_min, int dst_max, int dst_width);
+    switch (cn)
+    {
+    case  1: hResize = src_width > interpolation::len ? hlineResizeCn<ET, fixedpoint, interpolation::len, true, 1> : hlineResizeCn<ET, fixedpoint, interpolation::len, false, 1>; break;
+    case  2: hResize = src_width > interpolation::len ? hlineResizeCn<ET, fixedpoint, interpolation::len, true, 2> : hlineResizeCn<ET, fixedpoint, interpolation::len, false, 2>; break;
+    case  3: hResize = src_width > interpolation::len ? hlineResizeCn<ET, fixedpoint, interpolation::len, true, 3> : hlineResizeCn<ET, fixedpoint, interpolation::len, false, 3>; break;
+    case  4: hResize = src_width > interpolation::len ? hlineResizeCn<ET, fixedpoint, interpolation::len, true, 4> : hlineResizeCn<ET, fixedpoint, interpolation::len, false, 4>; break;
+    default: hResize = src_width > interpolation::len ? hlineResize<ET, fixedpoint, interpolation::len, true>      : hlineResize<ET, fixedpoint, interpolation::len, false>     ; break;
+    }
+
+    interpolation interp_x(inv_scale_x, src_width, dst_width);
+    interpolation interp_y(inv_scale_y, src_height, dst_height);
+
+    AutoBuffer<uchar> buf( dst_width * sizeof(int) +
+                           dst_height * sizeof(int) +
+                           dst_width * interp_x.len*sizeof(fixedpoint) +
+                           dst_height * interp_y.len * sizeof(fixedpoint) );
+    int* xoffsets = (int*)buf.data();
+    int* yoffsets = xoffsets + dst_width;
+    fixedpoint* xcoeffs = (fixedpoint*)(yoffsets + dst_height);
+    fixedpoint* ycoeffs = xcoeffs + dst_width * interp_x.len;
+
+    int min_x, max_x, min_y, max_y;
+    for (int dx = 0; dx < dst_width; dx++)
+        interp_x.getCoeffs(dx, xoffsets+dx, xcoeffs+dx*interp_x.len);
+    interp_x.getMinMax(min_x, max_x);
+    for (int dy = 0; dy < dst_height; dy++)
+        interp_y.getCoeffs(dy, yoffsets+dy, ycoeffs+dy*interp_y.len);
+    interp_y.getMinMax(min_y, max_y);
+
+    resize_bitExactInvoker<ET, fixedpoint, interpolation::len> invoker(src, src_step, src_width, src_height, dst, dst_step, dst_width, dst_height, cn,
+                                                                       xoffsets, yoffsets, xcoeffs, ycoeffs, min_x, max_x, min_y, max_y, hResize);
+    Range range(0, dst_height);
+    parallel_for_(range, invoker, dst_width * dst_height / (double)(1 << 16));
+}
+
+typedef void(*be_resize_func)(const uchar* src, size_t src_step, int src_width, int src_height,
+                                    uchar* dst, size_t dst_step, int dst_width, int dst_height,
+                              int cn, double inv_scale_x, double inv_scale_y);
+
+}
 
 namespace cv
 {
@@ -89,7 +815,7 @@ static inline void interpolateLanczos4( float x, float* coeffs )
     }
 
     float sum = 0;
-    double y0=-(x+3)*CV_PI*0.25, s0 = sin(y0), c0=cos(y0);
+    double y0=-(x+3)*CV_PI*0.25, s0 = std::sin(y0), c0= std::cos(y0);
     for(int i = 0; i < 8; i++ )
     {
         double y = -(x+3-i)*CV_PI*0.25;
@@ -133,7 +859,7 @@ public:
     {
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         Size ssize = src.size(), dsize = dst.size();
         int y, x, pix_size = (int)src.elemSize();
@@ -224,7 +950,7 @@ resizeNN( const Mat& src, Mat& dst, double fx, double fy )
 {
     Size ssize = src.size(), dsize = dst.size();
     AutoBuffer<int> _x_ofs(dsize.width);
-    int* x_ofs = _x_ofs;
+    int* x_ofs = _x_ofs.data();
     int pix_size = (int)src.elemSize();
     int pix_size4 = (int)(pix_size / sizeof(int));
     double ifx = 1./fx, ify = 1./fy;
@@ -1485,7 +2211,7 @@ public:
         CV_Assert(ksize <= MAX_ESIZE);
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         int dy, cn = src.channels();
         HResize hresize;
@@ -1500,7 +2226,7 @@ public:
         for(int k = 0; k < ksize; k++ )
         {
             prev_sy[k] = -1;
-            rows[k] = (WT*)_buffer + bufstep*k;
+            rows[k] = _buffer.data() + bufstep*k;
         }
 
         const AT* beta = _beta + ksize * range.start;
@@ -2195,7 +2921,7 @@ public:
     {
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         Size ssize = src.size(), dsize = dst.size();
         int cn = src.channels();
@@ -2305,7 +3031,7 @@ public:
         tabofs = _tabofs;
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         Size dsize = dst->size();
         int cn = dst->channels();
@@ -2313,7 +3039,7 @@ public:
         AutoBuffer<WT> _buffer(dsize.width*2);
         const DecimateAlpha* xtab = xtab0;
         int xtab_size = xtab_size0;
-        WT *buf = _buffer, *sum = buf + dsize.width;
+        WT *buf = _buffer.data(), *sum = buf + dsize.width;
         int j_start = tabofs[range.start], j_end = tabofs[range.end], j, k, dx, prev_dy = ytab[j_start].di;
 
         for( dx = 0; dx < dsize.width; dx++ )
@@ -2596,7 +3322,7 @@ static bool ocl_resize( InputArray _src, OutputArray _dst, Size dsize,
         if (depth == CV_8U && ((void)0, 0))
         {
             AutoBuffer<uchar> _buffer((dsize.width + dsize.height)*(sizeof(int) + sizeof(short)*2));
-            int* xofs = (int*)(uchar*)_buffer, * yofs = xofs + dsize.width;
+            int* xofs = (int*)_buffer.data(), * yofs = xofs + dsize.width;
             short* ialpha = (short*)(yofs + dsize.height), * ibeta = ialpha + dsize.width*2;
             float fxx, fyy;
             int sx, sy;
@@ -2631,7 +3357,7 @@ static bool ocl_resize( InputArray _src, OutputArray _dst, Size dsize,
 
             int wdepth = std::max(depth, CV_32S), wtype = CV_MAKETYPE(wdepth, cn);
             UMat coeffs;
-            Mat(1, static_cast<int>(_buffer.size()), CV_8UC1, (uchar *)_buffer).copyTo(coeffs);
+            Mat(1, static_cast<int>(_buffer.size()), CV_8UC1, _buffer.data()).copyTo(coeffs);
 
             k.create("resizeLN", ocl::imgproc::resize_oclsrc,
                      format("-D INTER_LINEAR_INTEGER -D depth=%d -D T=%s -D T1=%s "
@@ -2714,17 +3440,17 @@ static bool ocl_resize( InputArray _src, OutputArray _dst, Size dsize,
 
             AutoBuffer<int> _xymap_tab(xytab_size), _xyofs_tab(tabofs_size);
             AutoBuffer<float> _xyalpha_tab(xytab_size);
-            int * xmap_tab = _xymap_tab, * ymap_tab = _xymap_tab + (ssize.width << 1);
-            float * xalpha_tab = _xyalpha_tab, * yalpha_tab = _xyalpha_tab + (ssize.width << 1);
-            int * xofs_tab = _xyofs_tab, * yofs_tab = _xyofs_tab + dsize.width + 1;
+            int * xmap_tab = _xymap_tab.data(), * ymap_tab = _xymap_tab.data() + (ssize.width << 1);
+            float * xalpha_tab = _xyalpha_tab.data(), * yalpha_tab = _xyalpha_tab.data() + (ssize.width << 1);
+            int * xofs_tab = _xyofs_tab.data(), * yofs_tab = _xyofs_tab.data() + dsize.width + 1;
 
             ocl_computeResizeAreaTabs(ssize.width, dsize.width, inv_fx, xmap_tab, xalpha_tab, xofs_tab);
             ocl_computeResizeAreaTabs(ssize.height, dsize.height, inv_fy, ymap_tab, yalpha_tab, yofs_tab);
 
             // loading precomputed arrays to GPU
-            Mat(1, xytab_size, CV_32FC1, (void *)_xyalpha_tab).copyTo(alphaOcl);
-            Mat(1, xytab_size, CV_32SC1, (void *)_xymap_tab).copyTo(mapOcl);
-            Mat(1, tabofs_size, CV_32SC1, (void *)_xyofs_tab).copyTo(tabofsOcl);
+            Mat(1, xytab_size, CV_32FC1, _xyalpha_tab.data()).copyTo(alphaOcl);
+            Mat(1, xytab_size, CV_32SC1, _xymap_tab.data()).copyTo(mapOcl);
+            Mat(1, tabofs_size, CV_32SC1, _xyofs_tab.data()).copyTo(tabofsOcl);
         }
 
         ocl::KernelArg srcarg = ocl::KernelArg::ReadOnly(src), dstarg = ocl::KernelArg::WriteOnly(dst);
@@ -2763,7 +3489,7 @@ public:
         m_ok = true;
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         CV_INSTRUMENT_REGION_IPP()
 
@@ -2813,7 +3539,7 @@ public:
         m_ok = true;
     }
 
-    virtual void operator() (const Range& range) const
+    virtual void operator() (const Range& range) const CV_OVERRIDE
     {
         CV_INSTRUMENT_REGION_IPP()
 
@@ -2851,7 +3577,7 @@ static bool ipp_resize(const uchar * src_data, size_t src_step, int src_width, i
 
     IppDataType           ippDataType = ippiGetDataType(depth);
     IppiInterpolationType ippInter    = ippiGetInterpolation(interpolation);
-    if(ippInter < 0)
+    if((int)ippInter < 0)
         return false;
 
     // Resize which doesn't match OpenCV exactly
@@ -2946,7 +3672,7 @@ void resize(int src_type,
 {
     CV_INSTRUMENT_REGION()
 
-    CV_Assert((dst_width * dst_height > 0) || (inv_scale_x > 0 && inv_scale_y > 0));
+    CV_Assert((dst_width > 0 && dst_height > 0) || (inv_scale_x > 0 && inv_scale_y > 0));
     if (inv_scale_x < DBL_EPSILON || inv_scale_y < DBL_EPSILON)
     {
         inv_scale_x = static_cast<double>(dst_width) / src_width;
@@ -2958,7 +3684,7 @@ void resize(int src_type,
     int  depth = CV_MAT_DEPTH(src_type), cn = CV_MAT_CN(src_type);
     Size dsize = Size(saturate_cast<int>(src_width*inv_scale_x),
                         saturate_cast<int>(src_height*inv_scale_y));
-    CV_Assert( dsize.area() > 0 );
+    CV_Assert( !dsize.empty() );
 
     CV_IPP_RUN_FAST(ipp_resize(src_data, src_step, src_width, src_height, dst_data, dst_step, dsize.width, dsize.height, inv_scale_x, inv_scale_y, depth, cn, interpolation))
 
@@ -3066,6 +3792,18 @@ void resize(int src_type,
         resizeArea_<double, double>, 0
     };
 
+    static be_resize_func linear_exact_tab[] =
+    {
+        resize_bitExact<uchar, interpolationLinear<uchar> >,
+        resize_bitExact<schar, interpolationLinear<schar> >,
+        resize_bitExact<ushort, interpolationLinear<ushort> >,
+        resize_bitExact<short, interpolationLinear<short> >,
+        resize_bitExact<int, interpolationLinear<int> >,
+        0,
+        0,
+        0
+    };
+
     double scale_x = 1./inv_scale_x, scale_y = 1./inv_scale_y;
 
     int iscale_x = saturate_cast<int>(scale_x);
@@ -3076,6 +3814,23 @@ void resize(int src_type,
 
     Mat src(Size(src_width, src_height), src_type, const_cast<uchar*>(src_data), src_step);
     Mat dst(dsize, src_type, dst_data, dst_step);
+
+    if (interpolation == INTER_LINEAR_EXACT)
+    {
+        // in case of inv_scale_x && inv_scale_y is equal to 0.5
+        // INTER_AREA (fast) is equal to bit exact INTER_LINEAR
+        if (is_area_fast && iscale_x == 2 && iscale_y == 2 && cn != 2)//Area resize implementation for 2-channel images isn't bit-exact
+            interpolation = INTER_AREA;
+        else
+        {
+            be_resize_func func = linear_exact_tab[depth];
+            CV_Assert(func != 0);
+            func(src_data, src_step, src_width, src_height,
+                 dst_data, dst_step, dst_width, dst_height,
+                 cn, inv_scale_x, inv_scale_y);
+            return;
+        }
+    }
 
     if( interpolation == INTER_NEAREST )
     {
@@ -3092,7 +3847,7 @@ void resize(int src_type,
         if( interpolation == INTER_LINEAR && is_area_fast && iscale_x == 2 && iscale_y == 2 )
             interpolation = INTER_AREA;
 
-        // true "area" interpolation is only implemented for the case (scale_x <= 1 && scale_y <= 1).
+        // true "area" interpolation is only implemented for the case (scale_x >= 1 && scale_y >= 1).
         // In other cases it is emulated using some variant of bilinear interpolation
         if( interpolation == INTER_AREA && scale_x >= 1 && scale_y >= 1 )
         {
@@ -3101,7 +3856,7 @@ void resize(int src_type,
                 int area = iscale_x*iscale_y;
                 size_t srcstep = src_step / src.elemSize1();
                 AutoBuffer<int> _ofs(area + dsize.width*cn);
-                int* ofs = _ofs;
+                int* ofs = _ofs.data();
                 int* xofs = ofs + area;
                 ResizeAreaFastFunc func = areafast_tab[depth];
                 CV_Assert( func != 0 );
@@ -3126,13 +3881,13 @@ void resize(int src_type,
             CV_Assert( func != 0 && cn <= 4 );
 
             AutoBuffer<DecimateAlpha> _xytab((src_width + src_height)*2);
-            DecimateAlpha* xtab = _xytab, *ytab = xtab + src_width*2;
+            DecimateAlpha* xtab = _xytab.data(), *ytab = xtab + src_width*2;
 
             int xtab_size = computeResizeAreaTab(src_width, dsize.width, cn, scale_x, xtab);
             int ytab_size = computeResizeAreaTab(src_height, dsize.height, 1, scale_y, ytab);
 
             AutoBuffer<int> _tabofs(dsize.height + 1);
-            int* tabofs = _tabofs;
+            int* tabofs = _tabofs.data();
             for( k = 0, dy = 0; k < ytab_size; k++ )
             {
                 if( k == 0 || ytab[k].di != ytab[k-1].di )
@@ -3167,13 +3922,13 @@ void resize(int src_type,
     CV_Assert( func != 0 );
 
     AutoBuffer<uchar> _buffer((width + dsize.height)*(sizeof(int) + sizeof(float)*ksize));
-    int* xofs = (int*)(uchar*)_buffer;
+    int* xofs = (int*)_buffer.data();
     int* yofs = xofs + width;
     float* alpha = (float*)(yofs + dsize.height);
     short* ialpha = (short*)alpha;
     float* beta = alpha + width*ksize;
     short* ibeta = ialpha + width*ksize;
-    float cbuf[MAX_ESIZE];
+    float cbuf[MAX_ESIZE] = {0};
 
     for( dx = 0; dx < dsize.width; dx++ )
     {
@@ -3286,19 +4041,22 @@ void cv::resize( InputArray _src, OutputArray _dst, Size dsize,
 
     Size ssize = _src.size();
 
-    CV_Assert( ssize.width > 0 && ssize.height > 0 );
-    CV_Assert( dsize.area() > 0 || (inv_scale_x > 0 && inv_scale_y > 0) );
+    CV_Assert( !ssize.empty() );
+    CV_Assert( !dsize.empty() || (inv_scale_x > 0 && inv_scale_y > 0) );
     if( dsize.area() == 0 )
     {
         dsize = Size(saturate_cast<int>(ssize.width*inv_scale_x),
                      saturate_cast<int>(ssize.height*inv_scale_y));
-        CV_Assert( dsize.area() > 0 );
+        CV_Assert( !dsize.empty() );
     }
     else
     {
         inv_scale_x = (double)dsize.width/ssize.width;
         inv_scale_y = (double)dsize.height/ssize.height;
     }
+
+    if (interpolation == INTER_LINEAR_EXACT && (_src.depth() == CV_32F || _src.depth() == CV_64F))
+        interpolation = INTER_LINEAR; // If depth isn't supported fallback to generic resize
 
     CV_OCL_RUN(_src.dims() <= 2 && _dst.isUMat() && _src.cols() > 10 && _src.rows() > 10,
                ocl_resize(_src, _dst, dsize, inv_scale_x, inv_scale_y, interpolation))

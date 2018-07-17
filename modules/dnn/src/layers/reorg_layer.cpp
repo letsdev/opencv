@@ -41,16 +41,20 @@
 //M*/
 
 #include "../precomp.hpp"
+#include "../op_inf_engine.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/dnn/all_layers.hpp>
-#include <iostream>
+
+#ifdef HAVE_OPENCL
+#include "opencl_kernels_dnn.hpp"
+#endif
 
 namespace cv
 {
 namespace dnn
 {
 
-class ReorgLayerImpl : public ReorgLayer
+class ReorgLayerImpl CV_FINAL : public ReorgLayer
 {
     int reorgStride;
 public:
@@ -66,7 +70,7 @@ public:
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,
                          std::vector<MatShape> &outputs,
-                         std::vector<MatShape> &internals) const
+                         std::vector<MatShape> &internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size() > 0);
         outputs = std::vector<MatShape>(inputs.size(), shape(
@@ -81,11 +85,64 @@ public:
         return false;
     }
 
-    virtual bool supportBackend(int backendId)
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_DEFAULT;
+        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE;
     }
-    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals)
+
+#ifdef HAVE_OPENCL
+    bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays internals)
+    {
+        std::vector<UMat> inputs;
+        std::vector<UMat> outputs;
+
+        bool use_half = (inps.depth() == CV_16S);
+        inps.getUMatVector(inputs);
+        outs.getUMatVector(outputs);
+        String buildopt= format("-DDtype=%s ", use_half ? "half" : "float");
+
+        for (size_t i = 0; i < inputs.size(); i++)
+        {
+            ocl::Kernel kernel("reorg", ocl::dnn::reorg_oclsrc, buildopt);
+            if (kernel.empty())
+                return false;
+
+            UMat& srcBlob = inputs[i];
+            UMat& dstBlob = outputs[0];
+            int channels = srcBlob.size[1];
+            int height = srcBlob.size[2];
+            int width = srcBlob.size[3];
+            size_t nthreads = channels * height * width;
+
+            kernel.set(0, (int)nthreads);
+            kernel.set(1, ocl::KernelArg::PtrReadOnly(srcBlob));
+            kernel.set(2, (int)channels);
+            kernel.set(3, (int)height);
+            kernel.set(4, (int)width);
+            kernel.set(5, (int)reorgStride);
+            kernel.set(6, ocl::KernelArg::PtrWriteOnly(dstBlob));
+
+            if (!kernel.run(1, &nthreads, NULL, false))
+                return false;
+        }
+
+        return true;
+    }
+#endif
+
+    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
+    {
+        CV_TRACE_FUNCTION();
+        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+
+        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
+                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+
+        Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+    }
+
+    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
@@ -117,8 +174,22 @@ public:
         }
     }
 
+    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+    {
+#ifdef HAVE_INF_ENGINE
+        InferenceEngine::LayerParams lp;
+        lp.name = name;
+        lp.type = "ReorgYolo";
+        lp.precision = InferenceEngine::Precision::FP32;
+        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
+        ieLayer->params["stride"] = format("%d", reorgStride);
+        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+#endif  // HAVE_INF_ENGINE
+        return Ptr<BackendNode>();
+    }
+
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,
-                           const std::vector<MatShape> &outputs) const
+                           const std::vector<MatShape> &outputs) const CV_OVERRIDE
     {
         (void)outputs; // suppress unused variable warning
 

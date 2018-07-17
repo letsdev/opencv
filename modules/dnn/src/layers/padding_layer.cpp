@@ -10,7 +10,8 @@ Implementation of padding layer, which adds paddings to input blob.
 */
 
 #include "../precomp.hpp"
-#include "op_halide.hpp"
+#include "layers_common.hpp"
+#include "../op_halide.hpp"
 #include <vector>
 
 namespace cv
@@ -18,7 +19,7 @@ namespace cv
 namespace dnn
 {
 
-class PaddingLayerImpl : public PaddingLayer
+class PaddingLayerImpl CV_FINAL : public PaddingLayer
 {
 public:
     PaddingLayerImpl(const LayerParams &params)
@@ -26,6 +27,7 @@ public:
         setParamsFrom(params);
         paddingValue = params.get<float>("value", 0);
         inputDims = params.get<int>("input_dims", -1);
+        paddingType = params.get<String>("type", "constant");
 
         CV_Assert(params.has("paddings"));
         const DictValue& paddingsParam = params.get("paddings");
@@ -43,7 +45,7 @@ public:
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,
                          std::vector<MatShape> &outputs,
-                         std::vector<MatShape> &internals) const
+                         std::vector<MatShape> &internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size() == 1);
         const MatShape& inpShape = inputs[0];
@@ -59,7 +61,7 @@ public:
         return false;
     }
 
-    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs)
+    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
     {
         // Compute dstRanges.
         const MatSize& inpShape = inputs[0]->size;
@@ -83,22 +85,67 @@ public:
             dstRanges.push_back(Range::all());
     }
 
-    virtual bool supportBackend(int backendId)
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_DEFAULT ||
+        return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_HALIDE && haveHalide() && dstRanges.size() == 4;
     }
 
-    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals)
+    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-        outputs[0].setTo(paddingValue);
-        inputs[0]->copyTo(outputs[0](dstRanges));
+        Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
     }
 
-    virtual Ptr<BackendNode> initHalide(const std::vector<Ptr<BackendWrapper> > &inputs)
+    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals) CV_OVERRIDE
+    {
+        CV_TRACE_FUNCTION();
+        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+
+        if (paddingType == "constant")
+        {
+            outputs[0].setTo(paddingValue);
+            inputs[0]->copyTo(outputs[0](dstRanges));
+        }
+        else if (paddingType == "reflect")
+        {
+            CV_Assert(inputs.size() == 1);
+            CV_Assert(outputs.size() == 1);
+            CV_Assert(inputs[0]->dims == 4);
+            CV_Assert(outputs[0].dims == 4);
+
+            if (inputs[0]->size[0] != outputs[0].size[0] || inputs[0]->size[1] != outputs[0].size[1])
+                CV_Error(Error::StsNotImplemented, "Only spatial reflection padding is supported.");
+
+            const int inpHeight = inputs[0]->size[2];
+            const int inpWidth = inputs[0]->size[3];
+            const int outHeight = outputs[0].size[2];
+            const int outWidth = outputs[0].size[3];
+            const int padTop = dstRanges[2].start;
+            const int padBottom = outHeight - dstRanges[2].end;
+            const int padLeft = dstRanges[3].start;
+            const int padRight = outWidth - dstRanges[3].end;
+            CV_Assert(padTop < inpHeight, padBottom < inpHeight,
+                      padLeft < inpWidth, padRight < inpWidth);
+
+            for (size_t n = 0; n < inputs[0]->size[0]; ++n)
+            {
+                for (size_t ch = 0; ch < inputs[0]->size[1]; ++ch)
+                {
+                    copyMakeBorder(getPlane(*inputs[0], n, ch),
+                                   getPlane(outputs[0], n, ch),
+                                   padTop, padBottom, padLeft, padRight,
+                                   BORDER_REFLECT_101);
+                }
+            }
+        }
+        else
+            CV_Error(Error::StsNotImplemented, "Unknown padding type: " + paddingType);
+    }
+
+    virtual Ptr<BackendNode> initHalide(const std::vector<Ptr<BackendWrapper> > &inputs) CV_OVERRIDE
     {
 #ifdef HAVE_HALIDE
         int inW, inH, inC, inN;
@@ -124,6 +171,7 @@ private:
     std::vector<Range> dstRanges;
     int inputDims;
     float paddingValue;
+    std::string paddingType;
 };
 
 Ptr<PaddingLayer> PaddingLayer::create(const LayerParams &params)

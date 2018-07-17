@@ -77,6 +77,10 @@
 
 #include "opencv_tests_config.hpp"
 
+namespace opencv_test {
+bool required_opencv_test_namespace = false;  // compilation check for non-refactored tests
+}
+
 namespace cvtest
 {
 
@@ -251,8 +255,9 @@ void BaseTest::safe_run( int start_from )
             const char* errorStr = cvErrorStr(exc.code);
             char buf[1 << 16];
 
-            sprintf( buf, "OpenCV Error:\n\t%s (%s) in %s, file %s, line %d",
-                    errorStr, exc.err.c_str(), exc.func.size() > 0 ?
+            const char* delim = exc.err.find('\n') == cv::String::npos ? "" : "\n";
+            sprintf( buf, "OpenCV Error:\n\t%s (%s%s) in %s, file %s, line %d",
+                    errorStr, delim, exc.err.c_str(), exc.func.size() > 0 ?
                     exc.func.c_str() : "unknown function", exc.file.c_str(), exc.line );
             ts->printf(TS::LOG, "%s\n", buf);
 
@@ -380,7 +385,9 @@ int BadArgTest::run_test_case( int expected_code, const string& _descr )
     catch(const cv::Exception& e)
     {
         thrown = true;
-        if( e.code != expected_code )
+        if (e.code != expected_code &&
+            e.code != cv::Error::StsError && e.code != cv::Error::StsAssert  // Exact error codes support will be dropped. Checks should provide proper text messages intead.
+        )
         {
             ts->printf(TS::LOG, "%s (test case #%d): the error code %d is different from the expected %d\n",
                        descr, test_case_idx, e.code, expected_code);
@@ -467,7 +474,8 @@ string TS::str_from_code( const TS::FailureCode code )
 
 static int tsErrorCallback( int status, const char* func_name, const char* err_msg, const char* file_name, int line, TS* ts )
 {
-    ts->printf(TS::LOG, "OpenCV Error:\n\t%s (%s) in %s, file %s, line %d\n", cvErrorStr(status), err_msg, func_name[0] != 0 ? func_name : "unknown function", file_name, line);
+    const char* delim = std::string(err_msg).find('\n') == std::string::npos ? "" : "\n";
+    ts->printf(TS::LOG, "OpenCV Error:\n\t%s (%s%s) in %s, file %s, line %d\n", cvErrorStr(status), delim, err_msg, func_name[0] != 0 ? func_name : "unknown function", file_name, line);
     return 0;
 }
 
@@ -694,11 +702,18 @@ void checkIppStatus()
     }
 }
 
+bool skipUnstableTests = false;
+bool runBigDataTests = false;
+int testThreads = 0;
+
 void parseCustomOptions(int argc, char **argv)
 {
     const char * const command_line_keys =
         "{ ipp test_ipp_check |false    |check whether IPP works without failures }"
         "{ test_seed          |809564   |seed for random numbers generator }"
+        "{ test_threads       |-1       |the number of worker threads, if parallel execution is enabled}"
+        "{ skip_unstable      |false    |skip unstable tests }"
+        "{ test_bigdata       |false    |run BigData tests (>=2Gb) }"
         "{ h   help           |false    |print help info                          }";
 
     cv::CommandLineParser parser(argc, argv, command_line_keys);
@@ -717,6 +732,11 @@ void parseCustomOptions(int argc, char **argv)
 #endif
 
     param_seed = parser.get<unsigned int>("test_seed");
+
+    testThreads = parser.get<int>("test_threads");
+
+    skipUnstableTests = parser.get<bool>("skip_unstable");
+    runBigDataTests = parser.get<bool>("test_bigdata");
 }
 
 
@@ -742,12 +762,12 @@ static bool isDirectory(const std::string& path)
 #endif
 }
 
-CV_EXPORTS void addDataSearchPath(const std::string& path)
+void addDataSearchPath(const std::string& path)
 {
     if (isDirectory(path))
         TS::ptr()->data_search_path.push_back(path);
 }
-CV_EXPORTS void addDataSearchSubDirectory(const std::string& subdir)
+void addDataSearchSubDirectory(const std::string& subdir)
 {
     TS::ptr()->data_search_subdir.push_back(subdir);
 }
@@ -823,7 +843,7 @@ std::string findDataFile(const std::string& relative_path, bool required)
 #endif
 #endif
     if (required)
-        CV_ErrorNoReturn(cv::Error::StsError, cv::format("OpenCV tests: Can't find required data file: %s", relative_path.c_str()));
+        CV_Error(cv::Error::StsError, cv::format("OpenCV tests: Can't find required data file: %s", relative_path.c_str()));
     throw SkipTestException(cv::format("OpenCV tests: Can't find data file: %s", relative_path.c_str()));
 }
 

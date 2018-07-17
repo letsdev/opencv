@@ -1,3 +1,4 @@
+from __future__ import print_function
 # Script to evaluate MobileNet-SSD object detection model trained in TensorFlow
 # using both TensorFlow and OpenCV. Example:
 #
@@ -18,7 +19,7 @@ parser = argparse.ArgumentParser(
                 'COCO evaluation framework is required: http://cocodataset.org')
 parser.add_argument('--weights', required=True,
                     help='Path to frozen_inference_graph.pb of MobileNet-SSD model. '
-                         'Download it at https://github.com/tensorflow/models/tree/master/research/object_detection')
+                         'Download it from http://download.tensorflow.org/models/object_detection/ssd_mobilenet_v1_coco_11_06_2017.tar.gz')
 parser.add_argument('--prototxt', help='Path to ssd_mobilenet_v1_coco.pbtxt from opencv_extra.', required=True)
 parser.add_argument('--images', help='Path to COCO validation images directory.', required=True)
 parser.add_argument('--annotations', help='Path to COCO annotations file.', required=True)
@@ -26,6 +27,7 @@ args = parser.parse_args()
 
 ### Get OpenCV predictions #####################################################
 net = cv.dnn.readNetFromTensorflow(args.weights, args.prototxt)
+net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV);
 
 detections = []
 for imgName in os.listdir(args.images):
@@ -115,14 +117,14 @@ pylab.rcParams['figure.figsize'] = (10.0, 8.0)
 annType = ['segm','bbox','keypoints']
 annType = annType[1]      #specify type here
 prefix = 'person_keypoints' if annType=='keypoints' else 'instances'
-print 'Running demo for *%s* results.'%(annType)
+print('Running demo for *%s* results.'%(annType))
 
 #initialize COCO ground truth api
 cocoGt=COCO(args.annotations)
 
 #initialize COCO detections api
 for resFile in ['tf_result.json', 'cv_result.json']:
-    print resFile
+    print(resFile)
     cocoDt=cocoGt.loadRes(resFile)
 
     cocoEval = COCOeval(cocoGt,cocoDt,annType)

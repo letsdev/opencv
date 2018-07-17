@@ -6,6 +6,7 @@
 // Third party copyrights are property of their respective owners.
 
 #include "precomp.hpp"
+#include <opencv2/dnn/shape_utils.hpp>
 #include "op_halide.hpp"
 
 #ifdef HAVE_HALIDE
@@ -36,7 +37,7 @@ static MatShape getBufferShape(const MatShape& shape)
 
 static MatShape getBufferShape(const MatSize& size)
 {
-    return getBufferShape(MatShape(size.p, size.p + size[-1]));
+    return getBufferShape(shape(size));
 }
 
 Halide::Buffer<float> wrapToHalideBuffer(const Mat& mat)
@@ -105,7 +106,7 @@ HalideBackendWrapper::HalideBackendWrapper(int targetId, const cv::Mat& m)
     {
         Halide::Target t = Halide::get_host_target();
         t.set_feature(Halide::Target::OpenCL);
-        buffer.copy_to_device(get_default_device_interface_for_target(t));
+        buffer.copy_to_device(t);
     }
     else
         CV_Error(Error::StsNotImplemented, "Unknown target identifier");
@@ -160,7 +161,7 @@ void HalideBackendWrapper::setHostDirty()
 
 void getCanonicalSize(const MatSize& size, int* w, int* h, int* c, int* n)
 {
-    getCanonicalSize(MatShape(size.p, size.p + size[-1]), w, h, c, n);
+    getCanonicalSize(shape(size), w, h, c, n);
 }
 
 void getCanonicalSize(const MatShape& shape, int* width, int* height,
