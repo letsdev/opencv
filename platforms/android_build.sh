@@ -115,5 +115,5 @@ mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs
 
 rm $FINAL_RELEASE_FOLDER.zip
 zip -r $FINAL_RELEASE_FOLDER.zip $FINAL_RELEASE_FOLDER
-echo "Created zip at: $PWD$FINAL_RELEASE_FOLDER.zip"
+echo "Created zip at: $PWD/$FINAL_RELEASE_FOLDER.zip"
 exit 0
