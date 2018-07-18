@@ -67,28 +67,6 @@ mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs
 
 
 ################################################################################
-# armeabi build
-################################################################################
-echo "building for armeabi"
-
-ARCH="armeabi"
-rm -rf $ARM_BUILD_FOLDER
-
-scripts/cmake_android_arm.sh -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=ON -DENABLE_LTO=ON -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_ZLIB=ON -DWITH_JAVA=ON -DANDROID_NATIVE_API_LEVEL=14 -DANDROID_ABI=$ARCH -DANDROID_TOOLCHAIN_NAME=arm-linux-androideabi-4.9
-
-cd $ARM_BUILD_FOLDER
-make clean
-make -j8
-make install
-cd ..
-
-mkdir -p $FINAL_RELEASE_FOLDER/libs/$ARCH
-mv $INSTALL_DIR_NATIVE/libs/$ARCH/* $FINAL_RELEASE_FOLDER/libs/$ARCH
-mkdir -p $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
-mv $INSTALL_DIR_NATIVE/3rdparty/libs/$ARCH/* $FINAL_RELEASE_FOLDER/3rdparty/libs/$ARCH
-
-
-################################################################################
 # x86 build
 ################################################################################
 echo "building for x86"
