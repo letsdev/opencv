@@ -23,7 +23,7 @@ cd ..
 
 mv $LINUX_BUILD_FOLDER/$INSTALL_DIR_NATIVE/include/* $FINAL_RELEASE_FOLDER/include
 mkdir -p $FINAL_RELEASE_FOLDER/libs/
-mv $LINUX_BUILD_FOLDER/$INSTALL_DIR_NATIVE/*.so $FINAL_RELEASE_FOLDER/libs
+mv $LINUX_BUILD_FOLDER/$INSTALL_DIR_NATIVE/*.so.* $FINAL_RELEASE_FOLDER/libs
 
 ################################################################################
 # finish
