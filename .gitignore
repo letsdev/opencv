@@ -22,3 +22,13 @@ bin/
 *.tlog
 build
 .cache
+platforms/build_macos
+platforms/opencv_macos_bu
+platforms/opencv_macos
+platforms/build_linux
+platforms/build_android_arm
+platforms/opencv.dll
+platforms/opencv.zip
+platforms/opencv_linux.zip
+platforms/opencv_macos.zip
+platforms/opencv_windows.zip
