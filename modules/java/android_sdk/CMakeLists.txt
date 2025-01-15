@@ -1,6 +1,9 @@
 
 project(${the_module}_android)
 
+set(ANDROID_BUILD_BASE_DIR "/Users/fkoebel/Workspace/ld/components/opencv/platforms/android/build/" CACHE INTERNAL "")
+set(ANDROID_TMP_INSTALL_BASE_DIR "/Users/fkoebel/Workspace/ld/components/opencv/platforms/android/build/" CACHE INTERNAL "")
+
 if(ANDROID_EXECUTABLE)
   set(OPENCV_JAVA_DIR "${OpenCV_BINARY_DIR}/android_sdk" CACHE INTERNAL "")
 else()  # gradle
