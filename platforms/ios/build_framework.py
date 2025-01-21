@@ -109,7 +109,7 @@ class Builder:
             main_build_dir = self.getBuildDir(main_working_dir, target)
             dirs.append(main_build_dir)
 
-            cmake_flags = []
+            cmake_flags = ["-DBUILD_TESTS=OFF", "-DBUILD_JPEG_TURBO_DISABLE=ON"]
             if self.contrib:
                 cmake_flags.append("-DOPENCV_EXTRA_MODULES_PATH=%s" % self.contrib)
             if xcode_ver >= 7 and target[1] == 'iPhoneOS' and self.bitcodedisabled == False:
