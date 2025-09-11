@@ -56,11 +56,11 @@ endmacro()
 
 
 add_subdirectory(jni)  # generates ${the_module} target (${the_module}_jni doesn't work properly with Android non-gradle samples)
-if(ANDROID)
-  add_subdirectory(android_sdk)  # generates ${the_module}_android target
-else()
-  add_subdirectory(jar)  # generates ${the_module}_jar target
-endif()
+#if(ANDROID)
+  #add_subdirectory(android_sdk)  # generates ${the_module}_android target
+#else()
+  #add_subdirectory(jar)  # generates ${the_module}_jar target
+#endif()
 
 if(BUILD_TESTS)
   if(ANDROID)
